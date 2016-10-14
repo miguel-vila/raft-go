@@ -17,13 +17,21 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"labrpc"
+	"math/rand"
+	"sync"
+	"time"
+)
 
-// import "fmt"
-import "labrpc"
-
-import "bytes"
-import "encoding/gob"
+func randomTimeout() time.Duration {
+	rand.Seed(time.Now().UTC().UnixNano())
+	millis := 150 + rand.Intn(301)
+	return time.Duration(millis) * time.Millisecond
+}
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -48,13 +56,17 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	CurrentTerm int
-	VotedFor    int
-	Log         []LogEntry
+	CurrentTerm  int
+	VotedFor     int
+	AlreadyVoted bool
+	Log          []LogEntry
 
 	// Volatile
-	CommitIndex int
-	LastApplied int
+	CommitIndex      int
+	LastApplied      int
+	VotesReceived    int
+	electionTimeout  *ElectionTimeout
+	heartbeatsTicker *HeartbeatsTicker
 
 	// Volatile data when leader
 	NextIndex  []int
@@ -64,8 +76,46 @@ type Raft struct {
 }
 
 type LogEntry struct {
-	data int
-	term int
+	Data int
+	Term int
+}
+
+type ElectionTimeout struct {
+	ticker   *time.Ticker
+	stopChan chan struct{}
+}
+
+type HeartbeatsTicker struct {
+	ticker   *time.Ticker
+	stopChan chan struct{}
+}
+
+func (rf *Raft) startElectionTimeout(timeout time.Duration) {
+	et := &ElectionTimeout{}
+	et.ticker = time.NewTicker(timeout)
+	et.stopChan = make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-et.ticker.C:
+				fmt.Printf("Election timeout! Node %d starting new election\n", rf.me)
+				rf.startElection()
+				return
+			case <-et.stopChan:
+				et.ticker.Stop()
+				return
+			}
+		}
+
+	}()
+
+	rf.electionTimeout = et
+}
+
+func (rf *Raft) stopElectionTimeout() {
+	rf.electionTimeout.stopChan <- *new(struct{})
+	close(rf.electionTimeout.stopChan)
 }
 
 // return currentTerm and whether this server
@@ -93,8 +143,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.VotedFor)
 	e.Encode(len(rf.Log))
 	for i := range rf.Log {
-		e.Encode(rf.Log[i].data)
-		e.Encode(rf.Log[i].term)
+		e.Encode(rf.Log[i].Data)
+		e.Encode(rf.Log[i].Term)
 	}
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -114,8 +164,8 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&entries)
 	rf.Log = make([]LogEntry, entries)
 	for i := 0; i < entries; i += 1 {
-		d.Decode(&rf.Log[i].data)
-		d.Decode(&rf.Log[i].term)
+		d.Decode(&rf.Log[i].Data)
+		d.Decode(&rf.Log[i].Term)
 	}
 }
 
@@ -137,11 +187,62 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) lastEntry() LogEntry {
+	if len(rf.Log) == 0 {
+		return LogEntry{
+			Term: -1,
+			Data: 0,
+		}
+	}
+	return rf.Log[len(rf.Log)-1]
+}
+
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
+	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
+		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
+	fmt.Printf("Node %d received VoteRequest from %d -> %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
+
+	reply.Term = rf.CurrentTerm
+	if rf.CurrentTerm > args.Term || rf.AlreadyVoted {
+		reply.VoteGranted = false
+		return
+	}
+	if candidateIsAsUp2Date {
+		fmt.Printf("* Node %d Voted for %d\n", rf.me, args.CandidateId)
+		rf.VotedFor = args.CandidateId
+		rf.AlreadyVoted = true
+		reply.VoteGranted = true
+	} else {
+		reply.VoteGranted = false
+	}
+}
+
+// AppendEntries RPC Handler
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	if args.Term > rf.CurrentTerm {
+		rf.CurrentTerm = args.Term
+		rf.State = "follower"
+		rf.stopElectionTimeout()
+	}
+	if rf.State == "candidate" || rf.State == "follower" {
+
+	}
 }
 
 //
@@ -164,6 +265,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
+}
+
+func (rf *Raft) sendAppendRequest(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	return rf.peers[server].Call("Raft.AppendEntries", args, reply)
 }
 
 //
@@ -216,17 +321,93 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.State = "follower"
+	rf.startElectionTimeout(randomTimeout())
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	go func() {
-
-	}()
-
 	return rf
 }
 
-func (rf *Raft) startElection() {
+func (rf *Raft) buildVoteRequest() RequestVoteArgs {
+	return RequestVoteArgs{
+		Term:         rf.CurrentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: len(rf.Log),
+		LastLogTerm:  rf.lastEntry().Term,
+	}
+}
 
+func (rf *Raft) buildAppendEntriesRequest(entries []LogEntry) AppendEntriesArgs {
+	return AppendEntriesArgs{
+		Term:         rf.CurrentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: len(rf.Log) + 1, // @TODO <- is this right?
+		Entries:      entries,
+		LeaderCommit: rf.CommitIndex,
+	}
+}
+
+func (rf *Raft) startElection() {
+	rf.CurrentTerm = rf.CurrentTerm + 1
+	rf.VotedFor = rf.me
+	rf.VotesReceived = 1
+	rf.State = "candidate"
+	request := rf.buildVoteRequest()
+
+	for i := 0; i < len(rf.peers); i += 1 {
+		if i != rf.me {
+			var reply RequestVoteReply
+			fmt.Printf("Node %d asking for vote to node %d\n", rf.me, i)
+			rf.sendRequestVote(i, request, &reply)
+			fmt.Printf("Node %d asking for vote to node %d -> reply = %b \n", rf.me, i, reply.VoteGranted)
+			if reply.VoteGranted {
+				rf.VotesReceived += 1
+			}
+			// @TODO check term in response?
+		}
+	}
+
+	if rf.VotesReceived > len(rf.peers)/2 {
+		fmt.Printf("Node %d received a majority of the votes, becoming leader\n", rf.me)
+		rf.State = "leader"
+		rf.sendHeartbeats()
+		rf.scheduleHeartbeats()
+	}
+}
+
+func (rf *Raft) scheduleHeartbeats() {
+	rf.heartbeatsTicker = &HeartbeatsTicker{}
+	rf.heartbeatsTicker.ticker = time.NewTicker(100 * time.Millisecond)
+	rf.heartbeatsTicker.stopChan = make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case <-rf.heartbeatsTicker.ticker.C:
+				rf.sendHeartbeats()
+			case <-rf.heartbeatsTicker.stopChan:
+				rf.heartbeatsTicker.ticker.Stop()
+				return
+			}
+		}
+	}()
+}
+
+func (rf *Raft) stopHeartbeats() {
+	rf.heartbeatsTicker.stopChan <- *new(struct{})
+	close(rf.heartbeatsTicker.stopChan)
+}
+
+func (rf *Raft) sendHeartbeats() {
+	//fmt.Printf("Node %d sending heartbeats\n", rf.me)
+	heartbeat := rf.buildAppendEntriesRequest([]LogEntry{})
+	for i := 0; i < len(rf.peers); i += 1 {
+		if i != rf.me {
+			var reply AppendEntriesReply
+			rf.sendAppendRequest(i, heartbeat, &reply) // @TODO handle return error?
+			// @TODO what to do with the answer in this case
+		}
+	}
 }
