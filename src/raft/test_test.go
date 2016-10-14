@@ -25,8 +25,8 @@ func TestEncDec(t *testing.T) {
 	rf.CurrentTerm = 1
 	rf.VotedFor = 2
 	l1 := new(LogEntry)
-	l1.data = 123
-	l1.term = 34
+	l1.Data = 123
+	l1.Term = 34
 	rf.Log = []LogEntry{*l1}
 	rf.CommitIndex = 456
 	rf.LastApplied = 567
