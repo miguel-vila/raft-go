@@ -280,6 +280,9 @@ func (cfg *config) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
+			if (len(leaders[lastTermWithLeader]) > 1) {
+				fmt.Printf("-- TEST: shiat, more than 1 leader")
+			}
 			return leaders[lastTermWithLeader][0]
 		}
 	}

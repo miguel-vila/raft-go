@@ -25,11 +25,12 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+	"strings"
 )
 
 func randomTimeout() time.Duration {
 	rand.Seed(time.Now().UTC().UnixNano())
-	millis := 150 + rand.Intn(301)
+	millis := 150 + rand.Intn(201)
 	return time.Duration(millis) * time.Millisecond
 }
 
@@ -91,6 +92,10 @@ type HeartbeatsTicker struct {
 }
 
 func (rf *Raft) startElectionTimeout(timeout time.Duration) {
+	if rf.electionTimeout != nil {
+		rf.stopElectionTimeout()
+	}
+
 	et := &ElectionTimeout{}
 	et.ticker = time.NewTicker(timeout)
 	et.stopChan = make(chan struct{})
@@ -99,7 +104,7 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 		for {
 			select {
 			case <-et.ticker.C:
-				fmt.Printf("Election timeout! Node %d starting new election\n", rf.me)
+				fmt.Printf("%sElection timeout! Node %d starting new election\n", tabs(rf.me), rf.me)
 				rf.startElection()
 				return
 			case <-et.stopChan:
@@ -116,6 +121,7 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 func (rf *Raft) stopElectionTimeout() {
 	rf.electionTimeout.stopChan <- *new(struct{})
 	close(rf.electionTimeout.stopChan)
+	rf.electionTimeout = nil
 }
 
 // return currentTerm and whether this server
@@ -210,38 +216,50 @@ func (rf *Raft) lastEntry() LogEntry {
 	return rf.Log[len(rf.Log)-1]
 }
 
+func tabs(i int) string {
+	return strings.Repeat("\t", i)
+}
+
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
 		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
-	fmt.Printf("Node %d received VoteRequest from %d -> %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
+	fmt.Printf("%s%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", tabs(rf.me), rf.me, args.CandidateId, candidateIsAsUp2Date)
 
 	reply.Term = rf.CurrentTerm
 	if rf.CurrentTerm > args.Term || rf.AlreadyVoted {
+		fmt.Printf("%s%d -> RequestVoteReply -> %d: AlreadyVoted or Term outdated\n", tabs(rf.me), rf.me, args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
 	if candidateIsAsUp2Date {
-		fmt.Printf("* Node %d Voted for %d\n", rf.me, args.CandidateId)
+		fmt.Printf("%s%d -> RequestVoteReply -> %d: Vote\n", tabs(rf.me), rf.me, args.CandidateId)
 		rf.VotedFor = args.CandidateId
 		rf.AlreadyVoted = true
 		reply.VoteGranted = true
+		rf.startElectionTimeout(randomTimeout())
 	} else {
 		reply.VoteGranted = false
+		fmt.Printf("%s%d -> RequestVoteReply -> %d: Candidate is not up2date\n", tabs(rf.me), rf.me, args.CandidateId)
 	}
 }
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.Term > rf.CurrentTerm {
+	if (rf.State == "leader"){
+		fmt.Printf("%s>>Weird<<", tabs(rf.me))
+	}
+	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
+		rf.stopElectionTimeout()
+		fmt.Printf("%s%d <- AppendEntries <- %d: New Leader Detected\n", tabs(rf.me), rf.me, args.LeaderId)
 		rf.CurrentTerm = args.Term
 		rf.State = "follower"
-		rf.stopElectionTimeout()
+		rf.AlreadyVoted = false
 	}
-	if rf.State == "candidate" || rf.State == "follower" {
-
+	if rf.State == "follower" && args.Term >= rf.CurrentTerm {
+		rf.startElectionTimeout(randomTimeout())
 	}
 }
 
@@ -315,6 +333,7 @@ func (rf *Raft) Kill() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	fmt.Printf("%sNode %d created\n", tabs(me), me)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -322,7 +341,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here.
 	rf.State = "follower"
-	rf.startElectionTimeout(randomTimeout())
+	timeout := randomTimeout()
+	rf.startElectionTimeout(timeout)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -352,25 +372,49 @@ func (rf *Raft) buildAppendEntriesRequest(entries []LogEntry) AppendEntriesArgs 
 func (rf *Raft) startElection() {
 	rf.CurrentTerm = rf.CurrentTerm + 1
 	rf.VotedFor = rf.me
+	rf.AlreadyVoted = true
 	rf.VotesReceived = 1
 	rf.State = "candidate"
 	request := rf.buildVoteRequest()
 
-	for i := 0; i < len(rf.peers); i += 1 {
+	peerCount := len(rf.peers)
+	sem := make(chan struct {int;bool;RequestVoteReply}, peerCount-1)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(peerCount-1)
+
+	for i := 0; i < peerCount; i += 1 {
 		if i != rf.me {
-			var reply RequestVoteReply
-			fmt.Printf("Node %d asking for vote to node %d\n", rf.me, i)
-			rf.sendRequestVote(i, request, &reply)
-			fmt.Printf("Node %d asking for vote to node %d -> reply = %b \n", rf.me, i, reply.VoteGranted)
-			if reply.VoteGranted {
-				rf.VotesReceived += 1
-			}
-			// @TODO check term in response?
+			go func(nodeId int) {
+				var reply RequestVoteReply
+				fmt.Printf("%s%d -> RequestVoteRequest -> %d\n", tabs(rf.me), rf.me, nodeId)
+				rpcSuccess := rf.sendRequestVote(nodeId, request, &reply)
+				sem <- struct {int;bool;RequestVoteReply}{nodeId, rpcSuccess, reply}
+				waitGroup.Done()
+			}(i)
 		}
 	}
 
+	go func() {
+		waitGroup.Wait()
+		close(sem)	
+	}()
+
+	for pair := range sem {
+		reply := pair.RequestVoteReply
+		i := pair.int
+		fmt.Printf("%s%d <- RequestVoteRequest <- %d: %t \n", tabs(rf.me), rf.me, i, reply.VoteGranted)
+		if reply.VoteGranted {
+			rf.VotesReceived += 1
+		}
+		if rf.VotesReceived > len(rf.peers)/2 {
+			break
+		}
+		// @TODO check term in response?
+	}
+
+	fmt.Printf("%sNode %d got %d votes\n", tabs(rf.me), rf.me, rf.VotesReceived)
 	if rf.VotesReceived > len(rf.peers)/2 {
-		fmt.Printf("Node %d received a majority of the votes, becoming leader\n", rf.me)
+		fmt.Printf("%sNode %d received a majority of the votes, becoming leader\n", tabs(rf.me), rf.me)
 		rf.State = "leader"
 		rf.sendHeartbeats()
 		rf.scheduleHeartbeats()
@@ -401,7 +445,6 @@ func (rf *Raft) stopHeartbeats() {
 }
 
 func (rf *Raft) sendHeartbeats() {
-	//fmt.Printf("Node %d sending heartbeats\n", rf.me)
 	heartbeat := rf.buildAppendEntriesRequest([]LogEntry{})
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
