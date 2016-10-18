@@ -23,9 +23,9 @@ import (
 	"fmt"
 	"labrpc"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
-	"strings"
 )
 
 func randomTimeout() time.Duration {
@@ -248,7 +248,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	if (rf.State == "leader"){
+	if rf.State == "leader" {
 		fmt.Printf("%s>>Weird<<", tabs(rf.me))
 	}
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
@@ -378,9 +378,13 @@ func (rf *Raft) startElection() {
 	request := rf.buildVoteRequest()
 
 	peerCount := len(rf.peers)
-	sem := make(chan struct {int;bool;RequestVoteReply}, peerCount-1)
+	sem := make(chan struct {
+		int
+		bool
+		RequestVoteReply
+	}, peerCount-1)
 	var waitGroup sync.WaitGroup
-	waitGroup.Add(peerCount-1)
+	waitGroup.Add(peerCount - 1)
 
 	for i := 0; i < peerCount; i += 1 {
 		if i != rf.me {
@@ -388,7 +392,11 @@ func (rf *Raft) startElection() {
 				var reply RequestVoteReply
 				fmt.Printf("%s%d -> RequestVoteRequest -> %d\n", tabs(rf.me), rf.me, nodeId)
 				rpcSuccess := rf.sendRequestVote(nodeId, request, &reply)
-				sem <- struct {int;bool;RequestVoteReply}{nodeId, rpcSuccess, reply}
+				sem <- struct {
+					int
+					bool
+					RequestVoteReply
+				}{nodeId, rpcSuccess, reply}
 				waitGroup.Done()
 			}(i)
 		}
@@ -396,7 +404,7 @@ func (rf *Raft) startElection() {
 
 	go func() {
 		waitGroup.Wait()
-		close(sem)	
+		close(sem)
 	}()
 
 	for pair := range sem {
