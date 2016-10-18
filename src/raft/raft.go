@@ -112,16 +112,17 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 				return
 			}
 		}
-
 	}()
 
 	rf.electionTimeout = et
 }
 
 func (rf *Raft) stopElectionTimeout() {
-	rf.electionTimeout.stopChan <- *new(struct{})
-	close(rf.electionTimeout.stopChan)
-	rf.electionTimeout = nil
+	if rf.electionTimeout != nil {
+		rf.electionTimeout.stopChan <- *new(struct{})
+		close(rf.electionTimeout.stopChan)
+		rf.electionTimeout = nil
+	}
 }
 
 // return currentTerm and whether this server
@@ -317,6 +318,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
+	fmt.Printf("%sCalled kill on Node %d\n", tabs(rf.me), rf.me)
+	rf.stopHeartbeats()
 	// Your code here, if desired.
 }
 
@@ -378,7 +381,7 @@ func (rf *Raft) startElection() {
 	request := rf.buildVoteRequest()
 
 	peerCount := len(rf.peers)
-	sem := make(chan struct {
+	repliesChan := make(chan struct {
 		int
 		bool
 		RequestVoteReply
@@ -392,7 +395,7 @@ func (rf *Raft) startElection() {
 				var reply RequestVoteReply
 				fmt.Printf("%s%d -> RequestVoteRequest -> %d\n", tabs(rf.me), rf.me, nodeId)
 				rpcSuccess := rf.sendRequestVote(nodeId, request, &reply)
-				sem <- struct {
+				repliesChan <- struct {
 					int
 					bool
 					RequestVoteReply
@@ -404,10 +407,10 @@ func (rf *Raft) startElection() {
 
 	go func() {
 		waitGroup.Wait()
-		close(sem)
+		close(repliesChan)
 	}()
 
-	for pair := range sem {
+	for pair := range repliesChan {
 		reply := pair.RequestVoteReply
 		i := pair.int
 		fmt.Printf("%s%d <- RequestVoteRequest <- %d: %t \n", tabs(rf.me), rf.me, i, reply.VoteGranted)
@@ -441,6 +444,7 @@ func (rf *Raft) scheduleHeartbeats() {
 				rf.sendHeartbeats()
 			case <-rf.heartbeatsTicker.stopChan:
 				rf.heartbeatsTicker.ticker.Stop()
+				rf.heartbeatsTicker = nil
 				return
 			}
 		}
@@ -448,17 +452,50 @@ func (rf *Raft) scheduleHeartbeats() {
 }
 
 func (rf *Raft) stopHeartbeats() {
-	rf.heartbeatsTicker.stopChan <- *new(struct{})
-	close(rf.heartbeatsTicker.stopChan)
+	if rf.heartbeatsTicker != nil {
+		rf.heartbeatsTicker.stopChan <- *new(struct{})
+		close(rf.heartbeatsTicker.stopChan)
+	}
 }
 
 func (rf *Raft) sendHeartbeats() {
+	fmt.Printf("%sNode %d sending heartbeats\n", tabs(rf.me), rf.me)
 	heartbeat := rf.buildAppendEntriesRequest([]LogEntry{})
+
+	peerCount := len(rf.peers)
+	hbsRepliesChan := make(chan struct {
+		int
+		bool
+		AppendEntriesReply
+	}, peerCount-1)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(peerCount - 1)
+
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
-			var reply AppendEntriesReply
-			rf.sendAppendRequest(i, heartbeat, &reply) // @TODO handle return error?
+			go func(nodeId int) {
+				var reply AppendEntriesReply
+				rpcReceived := rf.sendAppendRequest(nodeId, heartbeat, &reply)
+				if rpcReceived {
+					fmt.Printf("%sNode %d sent heartbeat to node %d successfully\n", tabs(rf.me), rf.me, nodeId)
+				} else {
+					fmt.Printf("%sNode %d sent heartbeat to node %d but didn't receive ack\n", tabs(rf.me), rf.me, nodeId)
+				}
+				hbsRepliesChan <- struct {
+					int
+					bool
+					AppendEntriesReply
+				}{nodeId, rpcReceived, reply}
+				waitGroup.Done()
+			}(i)
 			// @TODO what to do with the answer in this case
 		}
 	}
+
+	go func() {
+		waitGroup.Wait()
+		close(hbsRepliesChan)
+	}()
+
+	// @TODO do something with the replies
 }
