@@ -105,8 +105,9 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 			select {
 			case <-et.ticker.C:
 				fmt.Printf("%sElection timeout! Node %d starting new election\n", tabs(rf.me), rf.me)
-				rf.startElection()
-				return
+				go func(){
+					rf.startElection()
+				}()
 			case <-et.stopChan:
 				et.ticker.Stop()
 				return
@@ -119,9 +120,13 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 
 func (rf *Raft) stopElectionTimeout() {
 	if rf.electionTimeout != nil {
+		fmt.Printf("%sStopping election timeout\n", tabs(rf.me))
 		rf.electionTimeout.stopChan <- *new(struct{})
+		fmt.Printf("%sStopped election timeout\n", tabs(rf.me))
 		close(rf.electionTimeout.stopChan)
 		rf.electionTimeout = nil
+	} else {
+		fmt.Printf("%sTried to stop electionTimeout, but none running\n", tabs(rf.me))
 	}
 }
 
@@ -221,6 +226,14 @@ func tabs(i int) string {
 	return strings.Repeat("\t", i)
 }
 
+func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
+	fmt.Printf("%s%d -> RequestVoteReply -> %d: Vote\n", tabs(rf.me), rf.me, args.CandidateId)
+	rf.VotedFor = args.CandidateId
+	rf.AlreadyVoted = true
+	reply.VoteGranted = true
+	rf.startElectionTimeout(randomTimeout())
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -230,17 +243,20 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	fmt.Printf("%s%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", tabs(rf.me), rf.me, args.CandidateId, candidateIsAsUp2Date)
 
 	reply.Term = rf.CurrentTerm
+
+	if rf.State == "candidate" && rf.CurrentTerm < args.Term {
+		rf.State = "follower"
+		rf.VoteYes(args, reply)
+		return
+	}
+
 	if rf.CurrentTerm > args.Term || rf.AlreadyVoted {
 		fmt.Printf("%s%d -> RequestVoteReply -> %d: AlreadyVoted or Term outdated\n", tabs(rf.me), rf.me, args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
 	if candidateIsAsUp2Date {
-		fmt.Printf("%s%d -> RequestVoteReply -> %d: Vote\n", tabs(rf.me), rf.me, args.CandidateId)
-		rf.VotedFor = args.CandidateId
-		rf.AlreadyVoted = true
-		reply.VoteGranted = true
-		rf.startElectionTimeout(randomTimeout())
+		rf.VoteYes(args, reply)
 	} else {
 		reply.VoteGranted = false
 		fmt.Printf("%s%d -> RequestVoteReply -> %d: Candidate is not up2date\n", tabs(rf.me), rf.me, args.CandidateId)
@@ -249,10 +265,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	if rf.State == "leader" {
-		fmt.Printf("%s>>Weird<<", tabs(rf.me))
-	}
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
+		if rf.State == "leader" {
+			fmt.Printf("%sStepping down!\n", tabs(rf.me))
+			rf.stopHeartbeats()
+			fmt.Printf("%sTheoretically stopped sending heartbeats\n", tabs(rf.me))
+		}
 		rf.stopElectionTimeout()
 		fmt.Printf("%s%d <- AppendEntries <- %d: New Leader Detected\n", tabs(rf.me), rf.me, args.LeaderId)
 		rf.CurrentTerm = args.Term
@@ -427,6 +445,7 @@ func (rf *Raft) startElection() {
 	if rf.VotesReceived > len(rf.peers)/2 {
 		fmt.Printf("%sNode %d received a majority of the votes, becoming leader\n", tabs(rf.me), rf.me)
 		rf.State = "leader"
+		rf.stopElectionTimeout()
 		rf.sendHeartbeats()
 		rf.scheduleHeartbeats()
 	}
@@ -445,6 +464,7 @@ func (rf *Raft) scheduleHeartbeats() {
 			case <-rf.heartbeatsTicker.stopChan:
 				rf.heartbeatsTicker.ticker.Stop()
 				rf.heartbeatsTicker = nil
+				fmt.Printf("%sStopped sending heartbeats!\n", tabs(rf.me))
 				return
 			}
 		}
@@ -475,11 +495,12 @@ func (rf *Raft) sendHeartbeats() {
 		if i != rf.me {
 			go func(nodeId int) {
 				var reply AppendEntriesReply
+				fmt.Printf("%s%d -> AppendEntries -> %d\n", tabs(rf.me), rf.me, nodeId)
 				rpcReceived := rf.sendAppendRequest(nodeId, heartbeat, &reply)
 				if rpcReceived {
-					fmt.Printf("%sNode %d sent heartbeat to node %d successfully\n", tabs(rf.me), rf.me, nodeId)
+					fmt.Printf("%s%d <- AppendEntries <- %d OK\n", tabs(rf.me), rf.me, nodeId)
 				} else {
-					fmt.Printf("%sNode %d sent heartbeat to node %d but didn't receive ack\n", tabs(rf.me), rf.me, nodeId)
+					fmt.Printf("%s%d <- AppendEntries <- %d TIMEOUT\n", tabs(rf.me), rf.me, nodeId)
 				}
 				hbsRepliesChan <- struct {
 					int
