@@ -113,6 +113,7 @@ func TestReElection(t *testing.T) {
 	fmt.Printf("-- TEST: Reconnecting node %d\n", leader2)
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
+	fmt.Printf("-- TEST: All tests passed!\n")
 
 	fmt.Printf("  ... Passed\n")
 }

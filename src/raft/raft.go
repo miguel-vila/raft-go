@@ -105,7 +105,7 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 			select {
 			case <-et.ticker.C:
 				fmt.Printf("%sElection timeout! Node %d starting new election\n", tabs(rf.me), rf.me)
-				go func(){
+				go func() {
 					rf.startElection()
 				}()
 			case <-et.stopChan:
@@ -462,9 +462,11 @@ func (rf *Raft) scheduleHeartbeats() {
 			case <-rf.heartbeatsTicker.ticker.C:
 				rf.sendHeartbeats()
 			case <-rf.heartbeatsTicker.stopChan:
+				rf.mu.Lock()
 				rf.heartbeatsTicker.ticker.Stop()
 				rf.heartbeatsTicker = nil
 				fmt.Printf("%sStopped sending heartbeats!\n", tabs(rf.me))
+				rf.mu.Unlock()
 				return
 			}
 		}
@@ -472,10 +474,12 @@ func (rf *Raft) scheduleHeartbeats() {
 }
 
 func (rf *Raft) stopHeartbeats() {
+	rf.mu.Lock()
 	if rf.heartbeatsTicker != nil {
 		rf.heartbeatsTicker.stopChan <- *new(struct{})
 		close(rf.heartbeatsTicker.stopChan)
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendHeartbeats() {
