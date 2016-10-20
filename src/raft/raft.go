@@ -54,7 +54,6 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd
 	persister *Persister
 	me        int // index into peers[]
-	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	CurrentTerm  int
@@ -134,7 +133,6 @@ func (rf *Raft) stopElectionTimeout() {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	// Your code here.
 	var term int = rf.CurrentTerm
 	var isleader bool = rf.State == "leader"
 
@@ -147,7 +145,6 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here.
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
 	e.Encode(rf.me)
@@ -166,7 +163,6 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	// Your code here.
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
 	d.Decode(&rf.me)
@@ -338,7 +334,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	fmt.Printf("%sCalled kill on Node %d\n", tabs(rf.me), rf.me)
 	rf.stopHeartbeats()
-	// Your code here, if desired.
 }
 
 //
@@ -360,7 +355,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here.
 	rf.State = "follower"
 	timeout := randomTimeout()
 	rf.startElectionTimeout(timeout)
@@ -452,34 +446,32 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) scheduleHeartbeats() {
-	rf.heartbeatsTicker = &HeartbeatsTicker{}
-	rf.heartbeatsTicker.ticker = time.NewTicker(100 * time.Millisecond)
-	rf.heartbeatsTicker.stopChan = make(chan struct{})
+	hbTicker := &HeartbeatsTicker{}
+	hbTicker.ticker = time.NewTicker(100 * time.Millisecond)
+	hbTicker.stopChan = make(chan struct{})
 
 	go func() {
 		for {
 			select {
-			case <-rf.heartbeatsTicker.ticker.C:
+			case <-hbTicker.ticker.C:
 				rf.sendHeartbeats()
-			case <-rf.heartbeatsTicker.stopChan:
-				rf.mu.Lock()
-				rf.heartbeatsTicker.ticker.Stop()
-				rf.heartbeatsTicker = nil
+			case <-hbTicker.stopChan:
+				hbTicker.ticker.Stop()
 				fmt.Printf("%sStopped sending heartbeats!\n", tabs(rf.me))
-				rf.mu.Unlock()
 				return
 			}
 		}
 	}()
+
+	rf.heartbeatsTicker = hbTicker
 }
 
 func (rf *Raft) stopHeartbeats() {
-	rf.mu.Lock()
 	if rf.heartbeatsTicker != nil {
 		rf.heartbeatsTicker.stopChan <- *new(struct{})
 		close(rf.heartbeatsTicker.stopChan)
+		rf.heartbeatsTicker = nil
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendHeartbeats() {
