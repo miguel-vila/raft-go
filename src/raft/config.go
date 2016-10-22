@@ -329,6 +329,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
+		fmt.Printf("Whats on the logs? logs[%d][%d]:%d %t\n", i, index, cmd1, ok)
 		cfg.mu.Unlock()
 
 		if ok {
@@ -400,6 +401,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
+					fmt.Printf("*** Successfully sent command(%d) to leader ***\n", cmd)
 					break
 				}
 			}
@@ -412,12 +414,18 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
+					fmt.Println("*** Committed in all servers ***")
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
 						// and it was the command we submitted.
 						return index
+					} else {
+						fmt.Println(">>> Wrong entry! <<<")
 					}
+				} else {
+					fmt.Printf(">>> Number of commits %d, expected %d <<<\n", nd, expectedServers)
 				}
+
 				time.Sleep(20 * time.Millisecond)
 			}
 		} else {

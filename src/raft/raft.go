@@ -67,6 +67,7 @@ type Raft struct {
 	VotesReceived    int
 	electionTimeout  *ElectionTimeout
 	heartbeatsTicker *HeartbeatsTicker
+	applyCh          chan ApplyMsg
 
 	// Volatile data when leader
 	NextIndex  []int
@@ -76,7 +77,7 @@ type Raft struct {
 }
 
 type LogEntry struct {
-	Data int
+	Data interface{}
 	Term int
 }
 
@@ -213,6 +214,7 @@ type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
 	PrevLogIndex int
+	PrevLogTerm  int
 	Entries      []LogEntry
 	LeaderCommit int
 }
@@ -279,6 +281,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.Term = rf.CurrentTerm
+
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
 		if rf.State == "leader" {
 			fmt.Printf("%sStepping down!\n", tabs(rf.me))
@@ -293,7 +297,61 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 	if rf.State == "follower" && args.Term >= rf.CurrentTerm {
 		rf.startElectionTimeout(randomTimeout())
+		reply.Success = rf.appendToLog(args)
 	}
+	if rf.State == "follower" && args.Term < rf.CurrentTerm {
+		reply.Success = false
+	}
+}
+
+func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
+	// reply false if we don't have prevLogIndex
+	if len(rf.Log) < args.PrevLogIndex - 1 {
+		fmt.Printf("%sDidn't have PrevLogIndex %d\n", tabs(rf.me), args.PrevLogIndex)
+		return false
+	}
+
+	fmt.Printf("%s%+v\n", tabs(rf.me),args)
+	if len(rf.Log) > 0 && args.PrevLogIndex > 0 {
+		// reply false if we do, but term doesn't match
+		if rf.Log[args.PrevLogIndex - 1].Term != args.PrevLogTerm {
+			fmt.Printf("%sTerms dont match %d %d\n", tabs(rf.me), rf.Log[args.PrevLogIndex - 1].Term, args.PrevLogTerm)
+			return false
+		}
+
+		// check if entries after prevLogIndex
+		// are different from ones in args.Entries
+		// if so, delete them and all that follow
+		for i := args.PrevLogIndex; i < args.PrevLogIndex + len(args.Entries) && i < len(rf.Log); i += 1 {
+			ourTerm := rf.Log[i].Term
+			theirTerm := args.Entries[i - args.PrevLogIndex - 1].Term
+			if ourTerm != theirTerm {
+				rf.Log = rf.Log[:i]
+				break
+			}
+		}
+	}
+
+	// append the entries not already in the log
+	firstNotInLog := len(rf.Log) - args.PrevLogIndex
+	entriesNotInLog := args.Entries[firstNotInLog:]
+	rf.Log = append(rf.Log, entriesNotInLog...)
+
+	fmt.Printf("%s%v\n", tabs(rf.me), rf.Log)
+
+	// set commitIndex to min(leaderCommitIndex, index of last entry received)
+	lastEntryIndex := args.PrevLogIndex + len(args.Entries)
+	newCommitIndex := min(args.LeaderCommit, lastEntryIndex)
+	rf.commitAndApply(newCommitIndex)
+	fmt.Printf("%sCommitIndex: %d\n", tabs(rf.me), rf.CommitIndex)
+	return true
+}
+
+func min(x, y int) int {
+    if x < y {
+        return x
+    }
+    return y
 }
 
 //
@@ -336,9 +394,21 @@ func (rf *Raft) sendAppendRequest(server int, args AppendEntriesArgs, reply *App
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := rf.State == "leader"
+
+	if isLeader {
+		index = len(rf.Log)+1
+		term = rf.CurrentTerm
+		var entry LogEntry
+		entry.Term = rf.CurrentTerm
+		entry.Data = command
+		rf.Log = append(rf.Log, entry)
+	}
 
 	return index, term, isLeader
 }
@@ -372,6 +442,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
+	rf.NextIndex = make([]int, len(peers))
+	for i := 0; i <len(peers); i += 1 {
+		rf.NextIndex[i] = 1
+	}
+
+	rf.MatchIndex = make([]int, len(peers))
 
 	rf.State = "follower"
 	timeout := randomTimeout()
@@ -390,16 +467,6 @@ func (rf *Raft) buildVoteRequest() RequestVoteArgs {
 		CandidateId:  rf.me,
 		LastLogIndex: len(rf.Log),
 		LastLogTerm:  rf.lastEntry().Term,
-	}
-}
-
-func (rf *Raft) buildAppendEntriesRequest(entries []LogEntry) AppendEntriesArgs {
-	return AppendEntriesArgs{
-		Term:         rf.CurrentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: len(rf.Log) + 1, // @TODO <- is this right?
-		Entries:      entries,
-		LeaderCommit: rf.CommitIndex,
 	}
 }
 
@@ -490,6 +557,7 @@ func (rf *Raft) startHeartbeatsTicker() {
 				}
 				enabled = true
 				hbTicker.ticker = time.NewTicker(100 * time.Millisecond)
+				rf.sendHeartbeats()
 			}
 		}
 	}()
@@ -499,22 +567,24 @@ func (rf *Raft) stopHeartbeats() {
 	rf.heartbeatsTicker.stopChan <- *new(struct{})
 }
 
-func (rf *Raft) sendHeartbeats() {
-	fmt.Printf("%sNode %d sending heartbeats\n", tabs(rf.me), rf.me)
-	heartbeat := rf.buildAppendEntriesRequest([]LogEntry{})
+type HeartbeatUpdateMsg struct {
+	NodeId   int
+	Success  bool
+	Reply    AppendEntriesReply
+	LogIndex int
+}
 
+func (rf *Raft) sendHeartbeats() {
+	fmt.Printf("%sNode %d sending heartbeats, log: %v\n", tabs(rf.me), rf.me, rf.Log)
 	peerCount := len(rf.peers)
-	hbsRepliesChan := make(chan struct {
-		int
-		bool
-		AppendEntriesReply
-	}, peerCount-1)
+	hbsRepliesChan := make(chan *HeartbeatUpdateMsg, peerCount-1)
 	var waitGroup sync.WaitGroup
 	waitGroup.Add(peerCount - 1)
 
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
 			go func(nodeId int) {
+				heartbeat := rf.buildAppendEntriesRequest(nodeId)
 				var reply AppendEntriesReply
 				fmt.Printf("%s%d -> AppendEntries -> %d\n", tabs(rf.me), rf.me, nodeId)
 				rpcReceived := rf.sendAppendRequest(nodeId, heartbeat, &reply)
@@ -523,14 +593,14 @@ func (rf *Raft) sendHeartbeats() {
 				} else {
 					fmt.Printf("%s%d <- AppendEntries <- %d TIMEOUT\n", tabs(rf.me), rf.me, nodeId)
 				}
-				hbsRepliesChan <- struct {
-					int
-					bool
-					AppendEntriesReply
-				}{nodeId, rpcReceived, reply}
+				hbsRepliesChan <- &HeartbeatUpdateMsg {
+					NodeId: nodeId,
+					Success: rpcReceived,
+					Reply: reply,
+					LogIndex: heartbeat.PrevLogIndex + len(heartbeat.Entries),
+				}
 				waitGroup.Done()
 			}(i)
-			// @TODO what to do with the answer in this case
 		}
 	}
 
@@ -539,5 +609,77 @@ func (rf *Raft) sendHeartbeats() {
 		close(hbsRepliesChan)
 	}()
 
-	// @TODO do something with the replies
+	for msg := range hbsRepliesChan {
+		fmt.Printf("%+v\n", msg)
+		if msg.Success {
+			if !msg.Reply.Success && msg.Reply.Term == rf.CurrentTerm {
+				// decrement nextIndex and retry
+				rf.NextIndex[msg.NodeId] -= 1
+				fmt.Printf("Reducing NextIndex of %d to %d\n", msg.NodeId, rf.NextIndex[msg.NodeId])
+			} else if msg.Reply.Success {
+				// update nextIndex
+				rf.NextIndex[msg.NodeId] = msg.LogIndex + 1
+				rf.MatchIndex[msg.NodeId] = msg.LogIndex
+				fmt.Printf("NextIndex[%d] is %d\n", msg.NodeId, rf.NextIndex[msg.NodeId])
+				rf.checkCommitted()
+			}
+		}
+	}
+}
+
+func (rf *Raft) buildEntriesForPeer(nodeId int) []LogEntry {
+	nextIndex := rf.NextIndex[nodeId]
+	if (nextIndex - 1 < len(rf.Log)){
+		index := nextIndex - 1
+		elements := rf.Log[index:]
+		return elements
+	}
+	return []LogEntry{}
+}
+
+
+func (rf *Raft) buildAppendEntriesRequest(nodeId int) AppendEntriesArgs {
+	entries := rf.buildEntriesForPeer(nodeId)
+	prevIndex := rf.NextIndex[nodeId] - 1
+	prevTerm := 0
+	if len(rf.Log) >= prevIndex && prevIndex > 0 {
+		prevTerm = rf.Log[prevIndex - 1].Term
+	}
+	return AppendEntriesArgs{
+		Term:         rf.CurrentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevIndex,
+		PrevLogTerm:  prevTerm,
+		Entries:      entries,
+		LeaderCommit: rf.CommitIndex,
+	}
+}
+
+func (rf *Raft) checkCommitted() {
+	lastIndex := len(rf.Log)
+	majority := len(rf.peers)/2
+	for n := lastIndex; n > rf.CommitIndex; n -= 1 {
+		counter := 1
+		for idx := range rf.MatchIndex {
+			if idx >= n {
+				counter += 1
+			}
+		}
+		if counter > majority {
+			rf.commitAndApply(n);
+			fmt.Printf(">> Committed = %d\n", n)
+			break;
+		}
+	}
+}
+
+func (rf *Raft) commitAndApply(index int) {
+	if rf.CommitIndex < index {
+		rf.CommitIndex = index
+		rf.applyCh <- *&ApplyMsg{
+			Index: index,
+			Command: rf.Log[index - 1].Data,
+		}
+		rf.LastApplied = index
+	}
 }
