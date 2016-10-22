@@ -88,10 +88,15 @@ type ElectionTimeout struct {
 type HeartbeatsTicker struct {
 	ticker   *time.Ticker
 	stopChan chan struct{}
+	restartChan chan struct{}
 }
 
 func (rf *Raft) restartElectionTimeout() {
 	rf.electionTimeout.restartChan <- *new(struct{})
+}
+
+func (rf *Raft) restartHeartbeatsTicker() {
+	rf.heartbeatsTicker.restartChan <- *new(struct{})
 }
 
 func (rf *Raft) startElectionTimeout(timeout time.Duration) {
@@ -245,7 +250,6 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
 		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
 	fmt.Printf("%s%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", tabs(rf.me), rf.me, args.CandidateId, candidateIsAsUp2Date)
@@ -372,6 +376,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.State = "follower"
 	timeout := randomTimeout()
 	rf.startElectionTimeout(timeout)
+	rf.startHeartbeatsTicker()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -455,38 +460,43 @@ func (rf *Raft) startElection() {
 		fmt.Printf("%sNode %d received a majority of the votes, becoming leader\n", tabs(rf.me), rf.me)
 		rf.State = "leader"
 		rf.sendHeartbeats()
-		rf.scheduleHeartbeats()
+		rf.restartHeartbeatsTicker()
 		rf.stopElectionTimeout()
 	}
 }
 
-func (rf *Raft) scheduleHeartbeats() {
+func (rf *Raft) startHeartbeatsTicker() {
 	hbTicker := &HeartbeatsTicker{}
 	hbTicker.ticker = time.NewTicker(100 * time.Millisecond)
-	hbTicker.stopChan = make(chan struct{})
+	hbTicker.stopChan = make(chan struct{}, 100)
+	hbTicker.restartChan = make(chan struct{}, 100)
+	rf.heartbeatsTicker = hbTicker
 
 	go func() {
+		enabled := false
 		for {
 			select {
 			case <-hbTicker.ticker.C:
-				rf.sendHeartbeats()
+				if enabled {
+					rf.sendHeartbeats()
+				}
 			case <-hbTicker.stopChan:
+				enabled = false
 				hbTicker.ticker.Stop()
 				fmt.Printf("%sStopped sending heartbeats!\n", tabs(rf.me))
-				return
+			case <- hbTicker.restartChan:
+				if enabled {
+					hbTicker.ticker.Stop()
+				}
+				enabled = true
+				hbTicker.ticker = time.NewTicker(100 * time.Millisecond)
 			}
 		}
 	}()
-
-	rf.heartbeatsTicker = hbTicker
 }
 
 func (rf *Raft) stopHeartbeats() {
-	if rf.heartbeatsTicker != nil {
-		rf.heartbeatsTicker.stopChan <- *new(struct{})
-		close(rf.heartbeatsTicker.stopChan)
-		rf.heartbeatsTicker = nil
-	}
+	rf.heartbeatsTicker.stopChan <- *new(struct{})
 }
 
 func (rf *Raft) sendHeartbeats() {
