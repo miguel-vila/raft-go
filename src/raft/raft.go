@@ -81,8 +81,8 @@ type LogEntry struct {
 }
 
 type ElectionTimeout struct {
-	ticker   *time.Ticker
-	stopChan chan struct{}
+	stopChan    chan struct{}
+	restartChan chan struct{}
 }
 
 type HeartbeatsTicker struct {
@@ -90,31 +90,42 @@ type HeartbeatsTicker struct {
 	stopChan chan struct{}
 }
 
+func (rf *Raft) restartElectionTimeout() {
+	rf.electionTimeout.restartChan <- *new(struct{})
+}
+
 func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 	if rf.electionTimeout != nil {
-		rf.stopElectionTimeout()
+		rf.restartElectionTimeout()
+		return
 	}
 
-	et := &ElectionTimeout{}
-	et.ticker = time.NewTicker(timeout)
-	et.stopChan = make(chan struct{})
+	rf.electionTimeout = &ElectionTimeout{}
+	rf.electionTimeout.stopChan = make(chan struct{}, 100)
+	rf.electionTimeout.restartChan = make(chan struct{}, 100)
 
 	go func() {
+		ticker := time.NewTicker(timeout)
 		for {
 			select {
-			case <-et.ticker.C:
+			case <-rf.electionTimeout.stopChan:
+				//fmt.Printf("%s*** STOPPING ELECTION TIMEOUT ***{\n", tabs(rf.me))
+				ticker.Stop()
+				//fmt.Printf("%s}*** STOPPING ELECTION TIMEOUT ***\n", tabs(rf.me))
+			case <-rf.electionTimeout.restartChan:
+				//fmt.Printf("%s*** RESTARTING ELECTION TIMEOUT ***{\n", tabs(rf.me))
+				ticker.Stop()
+				ticker = time.NewTicker(timeout)
+				//fmt.Printf("%s}*** RESTARTING ELECTION TIMEOUT ***\n", tabs(rf.me))
+			case <-ticker.C:
+				fmt.Printf("%s*** ELECTION TIMEOUT ***{\n", tabs(rf.me))
 				fmt.Printf("%sElection timeout! Node %d starting new election\n", tabs(rf.me), rf.me)
-				go func() {
-					rf.startElection()
-				}()
-			case <-et.stopChan:
-				et.ticker.Stop()
-				return
+				rf.startElection()
+				fmt.Printf("%s}*** ELECTION TIMEOUT ***\n", tabs(rf.me))
 			}
 		}
 	}()
 
-	rf.electionTimeout = et
 }
 
 func (rf *Raft) stopElectionTimeout() {
@@ -122,8 +133,6 @@ func (rf *Raft) stopElectionTimeout() {
 		fmt.Printf("%sStopping election timeout\n", tabs(rf.me))
 		rf.electionTimeout.stopChan <- *new(struct{})
 		fmt.Printf("%sStopped election timeout\n", tabs(rf.me))
-		close(rf.electionTimeout.stopChan)
-		rf.electionTimeout = nil
 	} else {
 		fmt.Printf("%sTried to stop electionTimeout, but none running\n", tabs(rf.me))
 	}
@@ -234,6 +243,9 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
 		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
 	fmt.Printf("%s%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", tabs(rf.me), rf.me, args.CandidateId, candidateIsAsUp2Date)
@@ -261,6 +273,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
 		if rf.State == "leader" {
 			fmt.Printf("%sStepping down!\n", tabs(rf.me))
@@ -393,6 +407,7 @@ func (rf *Raft) startElection() {
 	request := rf.buildVoteRequest()
 
 	peerCount := len(rf.peers)
+	// @TODO define type for response
 	repliesChan := make(chan struct {
 		int
 		bool
@@ -439,9 +454,9 @@ func (rf *Raft) startElection() {
 	if rf.VotesReceived > len(rf.peers)/2 {
 		fmt.Printf("%sNode %d received a majority of the votes, becoming leader\n", tabs(rf.me), rf.me)
 		rf.State = "leader"
-		rf.stopElectionTimeout()
 		rf.sendHeartbeats()
 		rf.scheduleHeartbeats()
+		rf.stopElectionTimeout()
 	}
 }
 
