@@ -50,6 +50,7 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
+	t0        time.Time
 	mu        sync.Mutex
 	peers     []*labrpc.ClientEnd
 	persister *Persister
@@ -124,10 +125,10 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 				ticker = time.NewTicker(timeout)
 				//fmt.Printf("%s}*** RESTARTING ELECTION TIMEOUT ***\n", tabs(rf.me))
 			case <-ticker.C:
-				fmt.Printf("%s*** ELECTION TIMEOUT ***{\n", tabs(rf.me))
-				fmt.Printf("%sElection timeout! Node %d starting new election\n", tabs(rf.me), rf.me)
+				rf.log("*** ELECTION TIMEOUT ***{\n")
+				rf.log("Election timeout! Node %d starting new election\n", rf.me)
 				rf.startElection()
-				fmt.Printf("%s}*** ELECTION TIMEOUT ***\n", tabs(rf.me))
+				rf.log("}*** ELECTION TIMEOUT ***\n")
 			}
 		}
 	}()
@@ -136,11 +137,11 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 
 func (rf *Raft) stopElectionTimeout() {
 	if rf.electionTimeout != nil {
-		fmt.Printf("%sStopping election timeout\n", tabs(rf.me))
+		rf.log("Stopping election timeout\n")
 		rf.electionTimeout.stopChan <- *new(struct{})
-		fmt.Printf("%sStopped election timeout\n", tabs(rf.me))
+		rf.log("Stopped election timeout\n")
 	} else {
-		fmt.Printf("%sTried to stop electionTimeout, but none running\n", tabs(rf.me))
+		rf.log("Tried to stop electionTimeout, but none running\n")
 	}
 }
 
@@ -239,7 +240,7 @@ func tabs(i int) string {
 }
 
 func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
-	fmt.Printf("%s%d -> RequestVoteReply -> %d: Vote\n", tabs(rf.me), rf.me, args.CandidateId)
+	rf.log("%d -> RequestVoteReply -> %d: Vote\n", rf.me, args.CandidateId)
 	rf.VotedFor = args.CandidateId
 	rf.AlreadyVoted = true
 	reply.VoteGranted = true
@@ -254,7 +255,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
 		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
-	fmt.Printf("%s%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", tabs(rf.me), rf.me, args.CandidateId, candidateIsAsUp2Date)
+	rf.log("%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
 
 	reply.Term = rf.CurrentTerm
 
@@ -265,7 +266,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.CurrentTerm > args.Term || rf.AlreadyVoted {
-		fmt.Printf("%s%d -> RequestVoteReply -> %d: AlreadyVoted or Term outdated\n", tabs(rf.me), rf.me, args.CandidateId)
+		rf.log("%d -> RequestVoteReply -> %d: AlreadyVoted or Term outdated\n", rf.me, args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
@@ -273,7 +274,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.VoteYes(args, reply)
 	} else {
 		reply.VoteGranted = false
-		fmt.Printf("%s%d -> RequestVoteReply -> %d: Candidate is not up2date\n", tabs(rf.me), rf.me, args.CandidateId)
+		rf.log("%d -> RequestVoteReply -> %d: Candidate is not up2date\n", rf.me, args.CandidateId)
 	}
 }
 
@@ -285,12 +286,12 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
 		if rf.State == "leader" {
-			fmt.Printf("%sStepping down!\n", tabs(rf.me))
+			rf.log("Stepping down!\n")
 			rf.stopHeartbeats()
-			fmt.Printf("%sTheoretically stopped sending heartbeats\n", tabs(rf.me))
+			rf.log("Theoretically stopped sending heartbeats\n")
 		}
 		rf.stopElectionTimeout()
-		fmt.Printf("%s%d <- AppendEntries <- %d: New Leader Detected\n", tabs(rf.me), rf.me, args.LeaderId)
+		rf.log("%d <- AppendEntries <- %d: New Leader Detected\n", rf.me, args.LeaderId)
 		rf.CurrentTerm = args.Term
 		rf.State = "follower"
 		rf.AlreadyVoted = false
@@ -307,15 +308,15 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	// reply false if we don't have prevLogIndex
 	if len(rf.Log) < args.PrevLogIndex-1 {
-		fmt.Printf("%sDidn't have PrevLogIndex %d\n", tabs(rf.me), args.PrevLogIndex)
+		rf.log("Didn't have PrevLogIndex %d\n", args.PrevLogIndex)
 		return false
 	}
 
-	fmt.Printf("%s%+v\n", tabs(rf.me), args)
+	rf.log("%+v\n", args)
 	if len(rf.Log) > 0 && args.PrevLogIndex > 0 {
 		// reply false if we do, but term doesn't match
 		if rf.Log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
-			fmt.Printf("%sTerms dont match %d %d\n", tabs(rf.me), rf.Log[args.PrevLogIndex-1].Term, args.PrevLogTerm)
+			rf.log("Terms don't match %d %d\n", rf.Log[args.PrevLogIndex-1].Term, args.PrevLogTerm)
 			return false
 		}
 
@@ -337,13 +338,13 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	entriesNotInLog := args.Entries[firstNotInLog:]
 	rf.Log = append(rf.Log, entriesNotInLog...)
 
-	fmt.Printf("%s%v\n", tabs(rf.me), rf.Log)
+	rf.log("%v\n", rf.Log)
 
 	// set commitIndex to min(leaderCommitIndex, index of last entry received)
 	lastEntryIndex := args.PrevLogIndex + len(args.Entries)
 	newCommitIndex := min(args.LeaderCommit, lastEntryIndex)
 	rf.commitAndApply(newCommitIndex)
-	fmt.Printf("%sCommitIndex: %d\n", tabs(rf.me), rf.CommitIndex)
+	rf.log("CommitIndex: %d\n", rf.CommitIndex)
 	return true
 }
 
@@ -420,7 +421,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
-	fmt.Printf("%sCalled kill on Node %d\n", tabs(rf.me), rf.me)
+	rf.log("Called kill on Node %d\n", rf.me)
 	rf.stopHeartbeats()
 }
 
@@ -437,8 +438,9 @@ func (rf *Raft) Kill() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	fmt.Printf("%sNode %d created\n", tabs(me), me)
 	rf := &Raft{}
+	rf.log("Node %d created\n", me)
+	rf.t0 = time.Now()
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -492,7 +494,7 @@ func (rf *Raft) startElection() {
 		if i != rf.me {
 			go func(nodeId int) {
 				var reply RequestVoteReply
-				fmt.Printf("%s%d -> RequestVoteRequest -> %d\n", tabs(rf.me), rf.me, nodeId)
+				rf.log("%d -> RequestVoteRequest -> %d\n", rf.me, nodeId)
 				rpcSuccess := rf.sendRequestVote(nodeId, request, &reply)
 				repliesChan <- struct {
 					int
@@ -512,7 +514,7 @@ func (rf *Raft) startElection() {
 	for pair := range repliesChan {
 		reply := pair.RequestVoteReply
 		i := pair.int
-		fmt.Printf("%s%d <- RequestVoteRequest <- %d: %t \n", tabs(rf.me), rf.me, i, reply.VoteGranted)
+		rf.log("%d <- RequestVoteRequest <- %d: %t \n", rf.me, i, reply.VoteGranted)
 		if reply.VoteGranted {
 			rf.VotesReceived += 1
 		}
@@ -522,9 +524,9 @@ func (rf *Raft) startElection() {
 		// @TODO check term in response?
 	}
 
-	fmt.Printf("%sNode %d got %d votes\n", tabs(rf.me), rf.me, rf.VotesReceived)
+	fmt.Printf("%sNode %d got %d votes\n", rf.VotesReceived)
 	if rf.VotesReceived > len(rf.peers)/2 {
-		fmt.Printf("%sNode %d received a majority of the votes, becoming leader\n", tabs(rf.me), rf.me)
+		rf.log("Node %d received a majority of the votes, becoming leader\n", rf.me)
 		rf.State = "leader"
 		rf.sendHeartbeats()
 		rf.restartHeartbeatsTicker()
@@ -550,7 +552,7 @@ func (rf *Raft) startHeartbeatsTicker() {
 			case <-hbTicker.stopChan:
 				enabled = false
 				hbTicker.ticker.Stop()
-				fmt.Printf("%sStopped sending heartbeats!\n", tabs(rf.me))
+				rf.log("Stopped sending heartbeats!\n")
 			case <-hbTicker.restartChan:
 				if enabled {
 					hbTicker.ticker.Stop()
@@ -575,64 +577,49 @@ type HeartbeatUpdateMsg struct {
 }
 
 func (rf *Raft) sendHeartbeats() {
-	fmt.Printf("%sNode %d sending heartbeats, log: %v\n", tabs(rf.me), rf.me, rf.Log)
-	peerCount := len(rf.peers)
-	hbsRepliesChan := make(chan *HeartbeatUpdateMsg, peerCount-1)
-	var waitGroup sync.WaitGroup
-	waitGroup.Add(peerCount - 1)
+	rf.log("Node %d sending heartbeats, log: %v\n", rf.me, rf.Log)
 
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
 			go func(nodeId int) {
 				heartbeat := rf.buildAppendEntriesRequest(nodeId)
 				var reply AppendEntriesReply
-				fmt.Printf("%s%d -> AppendEntries -> %d\n", tabs(rf.me), rf.me, nodeId)
+				rf.log("%d -> AppendEntries -> %d\n", rf.me, nodeId)
 				rpcReceived := rf.sendAppendRequest(nodeId, heartbeat, &reply)
 				if rpcReceived {
-					fmt.Printf("%s%d <- AppendEntries <- %d OK\n", tabs(rf.me), rf.me, nodeId)
+					rf.log("%d <- AppendEntries <- %d OK\n", nodeId, rf.me)
 				} else {
-					fmt.Printf("%s%d <- AppendEntries <- %d TIMEOUT\n", tabs(rf.me), rf.me, nodeId)
+					rf.log("%d <- AppendEntries <- %d TIMEOUT\n", nodeId, rf.me)
 				}
-				hbsRepliesChan <- &HeartbeatUpdateMsg{
-					NodeId:   nodeId,
-					Success:  rpcReceived,
-					Reply:    reply,
-					LogIndex: heartbeat.PrevLogIndex + len(heartbeat.Entries),
+
+				logIndex := heartbeat.PrevLogIndex + len(heartbeat.Entries)
+
+				if rpcReceived {
+					if !reply.Success && reply.Term == rf.CurrentTerm {
+						// decrement nextIndex and retry
+						rf.NextIndex[nodeId] -= 1
+						rf.log("Reducing NextIndex of %d to %d\n", nodeId, rf.NextIndex[nodeId])
+					} else if reply.Success {
+						// update nextIndex
+						rf.NextIndex[nodeId] = logIndex + 1
+						rf.MatchIndex[nodeId] = logIndex
+						rf.log("NextIndex[%d] is %d\n", nodeId, rf.NextIndex[nodeId])
+						rf.checkCommitted()
+					}
 				}
-				waitGroup.Done()
+
 			}(i)
 		}
 	}
 
-	go func() {
-		waitGroup.Wait()
-		close(hbsRepliesChan)
-	}()
-
-	fmt.Printf("%sREADING REPLIES {\n", tabs(rf.me))
-	for msg := range hbsRepliesChan {
-		//fmt.Printf("%+v\n", msg)
-		if msg.Success {
-			if !msg.Reply.Success && msg.Reply.Term == rf.CurrentTerm {
-				// decrement nextIndex and retry
-				rf.NextIndex[msg.NodeId] -= 1
-				fmt.Printf("Reducing NextIndex of %d to %d\n", msg.NodeId, rf.NextIndex[msg.NodeId])
-			} else if msg.Reply.Success {
-				// update nextIndex
-				rf.NextIndex[msg.NodeId] = msg.LogIndex + 1
-				rf.MatchIndex[msg.NodeId] = msg.LogIndex
-				fmt.Printf("NextIndex[%d] is %d\n", msg.NodeId, rf.NextIndex[msg.NodeId])
-				rf.checkCommitted()
-			}
-		}
-	}
-	fmt.Printf("%s} READING REPLIES\n", tabs(rf.me))
 }
 
 func (rf *Raft) buildEntriesForPeer(nodeId int) []LogEntry {
 	nextIndex := rf.NextIndex[nodeId]
 	if nextIndex-1 < len(rf.Log) {
 		index := nextIndex - 1
+		rf.log("index = %d\n", index)
+		rf.log("log length = %d\n", len(rf.Log))
 		elements := rf.Log[index:]
 		return elements
 	}
@@ -657,6 +644,8 @@ func (rf *Raft) buildAppendEntriesRequest(nodeId int) AppendEntriesArgs {
 }
 
 func (rf *Raft) checkCommitted() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	lastIndex := len(rf.Log)
 	majority := len(rf.peers) / 2
 	for n := lastIndex; n > rf.CommitIndex; n -= 1 {
@@ -675,7 +664,12 @@ func (rf *Raft) checkCommitted() {
 }
 
 func (rf *Raft) log(format string, args ...interface{}) {
-	fmt.Printf("%s"+format, tabs(rf.me), args)
+	t := time.Since(rf.t0)
+	if len(args) > 0 {
+		fmt.Printf("(%dms)%s"+format, t/time.Millisecond, tabs(rf.me), args)
+	} else {
+		fmt.Printf("(%dms)%s"+format, t/time.Millisecond, tabs(rf.me))
+	}
 }
 
 func (rf *Raft) commitAndApply(index int) {
