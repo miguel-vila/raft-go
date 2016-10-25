@@ -280,7 +280,7 @@ func (cfg *config) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
-			if (len(leaders[lastTermWithLeader]) > 1) {
+			if len(leaders[lastTermWithLeader]) > 1 {
 				fmt.Printf("-- TEST: shiat, more than 1 leader")
 			}
 			return leaders[lastTermWithLeader][0]
@@ -329,7 +329,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
-		fmt.Printf("Whats on the logs? logs[%d][%d]:%d %t\n", i, index, cmd1, ok)
+		//fmt.Printf("Whats on the logs? logs[%d][%d]:%d %t\n", i, index, cmd1, ok)
 		cfg.mu.Unlock()
 
 		if ok {

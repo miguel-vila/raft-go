@@ -609,8 +609,9 @@ func (rf *Raft) sendHeartbeats() {
 		close(hbsRepliesChan)
 	}()
 
+	fmt.Printf("%sREADING REPLIES {\n", tabs(rf.me))
 	for msg := range hbsRepliesChan {
-		fmt.Printf("%+v\n", msg)
+		//fmt.Printf("%+v\n", msg)
 		if msg.Success {
 			if !msg.Reply.Success && msg.Reply.Term == rf.CurrentTerm {
 				// decrement nextIndex and retry
@@ -625,6 +626,7 @@ func (rf *Raft) sendHeartbeats() {
 			}
 		}
 	}
+	fmt.Printf("%s} READING REPLIES\n", tabs(rf.me))
 }
 
 func (rf *Raft) buildEntriesForPeer(nodeId int) []LogEntry {
@@ -672,6 +674,10 @@ func (rf *Raft) checkCommitted() {
 	}
 }
 
+func (rf *Raft) log(format string, args ...interface{}) {
+	fmt.Printf("%s"+format, tabs(rf.me), args)
+}
+
 func (rf *Raft) commitAndApply(index int) {
 	if rf.CommitIndex < index {
 		rf.CommitIndex = index // @TODO shouldn't we apply the commands starting at CommitIndex up until index and not just the index one?
@@ -679,6 +685,7 @@ func (rf *Raft) commitAndApply(index int) {
 			Index:   index,
 			Command: rf.Log[index-1].Data,
 		}
+		rf.log("COMMITED %d \n", rf.Log[index-1].Data)
 		rf.LastApplied = index
 	}
 }
