@@ -116,16 +116,16 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 		for {
 			select {
 			case <-rf.electionTimeout.stopChan:
-				//fmt.Printf("%s*** STOPPING ELECTION TIMEOUT ***{\n", tabs(rf.me))
+				rf.log("*** STOPPING ELECTION TIMEOUT ***{\n")
 				ticker.Stop()
-				//fmt.Printf("%s}*** STOPPING ELECTION TIMEOUT ***\n", tabs(rf.me))
+				rf.log("}*** STOPPED ELECTION TIMEOUT ***\n")
 			case <-rf.electionTimeout.restartChan:
-				//fmt.Printf("%s*** RESTARTING ELECTION TIMEOUT ***{\n", tabs(rf.me))
+				rf.log("*** RESTARTING ELECTION TIMEOUT ***{\n")
 				ticker.Stop()
 				ticker = time.NewTicker(timeout)
-				//fmt.Printf("%s}*** RESTARTING ELECTION TIMEOUT ***\n", tabs(rf.me))
+				rf.log("}*** RESTARTING ELECTION TIMEOUT ***\n")
 			case <-ticker.C:
-				rf.log("*** ELECTION TIMEOUT TERM = %d ***{\n", rf.CurrentTerm)
+				rf.log("*** ELECTION TIMEOUT TERM = %d ***{\n", rf.CurrentTerm + 1)
 				rf.log("Election timeout! Node %d starting new election\n", rf.me)
 				rf.startElection()
 				rf.log("}*** ELECTION TIMEOUT TERM = %d ***\n", rf.CurrentTerm)
@@ -139,7 +139,6 @@ func (rf *Raft) stopElectionTimeout() {
 	if rf.electionTimeout != nil {
 		rf.log("Stopping election timeout\n")
 		rf.electionTimeout.stopChan <- *new(struct{})
-		rf.log("Stopped election timeout\n")
 	} else {
 		rf.log("Tried to stop electionTimeout, but none running\n")
 	}
@@ -302,6 +301,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 	if rf.State == "follower" && args.Term < rf.CurrentTerm {
 		reply.Success = false
+		rf.log("Denied AppendEntries, Term %d < %d\n", args.Term, rf.CurrentTerm)
 	}
 }
 
@@ -524,7 +524,7 @@ func (rf *Raft) startElection() {
 		// @TODO check term in response?
 	}
 
-	fmt.Printf("%sNode %d got %d votes\n", rf.VotesReceived)
+	rf.log("Node %d got %d votes\n", rf.me, rf.VotesReceived)
 	if rf.VotesReceived > len(rf.peers)/2 {
 		rf.log("Node %d received a majority of the votes, becoming leader\n", rf.me)
 		rf.State = "leader"
