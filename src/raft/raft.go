@@ -125,7 +125,7 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 				ticker = time.NewTicker(timeout)
 				rf.log("}*** RESTARTING ELECTION TIMEOUT ***\n")
 			case <-ticker.C:
-				rf.log("*** ELECTION TIMEOUT TERM = %d ***{\n", rf.CurrentTerm + 1)
+				rf.log("*** ELECTION TIMEOUT TERM = %d ***{\n", rf.CurrentTerm+1)
 				rf.log("Election timeout! Node %d starting new election\n", rf.me)
 				rf.startElection()
 				rf.log("}*** ELECTION TIMEOUT TERM = %d ***\n", rf.CurrentTerm)
@@ -265,7 +265,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.CurrentTerm > args.Term || rf.AlreadyVoted {
-		rf.log("%d -> RequestVoteReply -> %d: AlreadyVoted or Term outdated\n", rf.me, args.CandidateId)
+		if rf.CurrentTerm > args.Term {
+			rf.log("%d -> RequestVoteReply -> %d: Term outdated\n", rf.me, args.CandidateId)
+		} else {
+			rf.log("%d -> RequestVoteReply -> %d: AlreadyVoted - term = %d \n", rf.me, args.CandidateId, rf.CurrentTerm)
+		}
 		reply.VoteGranted = false
 		return
 	}
@@ -480,58 +484,33 @@ func (rf *Raft) startElection() {
 	rf.State = "candidate"
 	request := rf.buildVoteRequest()
 
-	peerCount := len(rf.peers)
-	// @TODO define type for response
-	repliesChan := make(chan struct {
-		int
-		bool
-		RequestVoteReply
-	}, peerCount-1)
-	var waitGroup sync.WaitGroup
-	waitGroup.Add(peerCount - 1)
-
-	for i := 0; i < peerCount; i += 1 {
+	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
 			go func(nodeId int) {
 				var reply RequestVoteReply
 				rf.log("%d -> RequestVoteRequest -> %d\n", rf.me, nodeId)
 				rpcSuccess := rf.sendRequestVote(nodeId, request, &reply)
-				repliesChan <- struct {
-					int
-					bool
-					RequestVoteReply
-				}{nodeId, rpcSuccess, reply}
-				waitGroup.Done()
+
+				rf.log("%d <- RequestVoteRequest <- %d: %t \n", rf.me, nodeId, reply.VoteGranted)
+				rf.mu.Lock()
+				if rpcSuccess && rf.State != "leader" { // this is a short-circuit
+					if reply.VoteGranted {
+						rf.VotesReceived += 1
+					}
+					rf.log("Node %d got %d votes so far\n", rf.me, rf.VotesReceived)
+					if rf.VotesReceived > len(rf.peers)/2 {
+						rf.log("Node %d received a majority of the votes, becoming leader\n", rf.me)
+						rf.State = "leader"
+						rf.sendHeartbeats()
+						rf.restartHeartbeatsTicker()
+						rf.stopElectionTimeout()
+					}
+				}
+				rf.mu.Unlock()
 			}(i)
 		}
 	}
 
-	go func() {
-		waitGroup.Wait()
-		close(repliesChan)
-	}()
-
-	for pair := range repliesChan {
-		reply := pair.RequestVoteReply
-		i := pair.int
-		rf.log("%d <- RequestVoteRequest <- %d: %t \n", rf.me, i, reply.VoteGranted)
-		if reply.VoteGranted {
-			rf.VotesReceived += 1
-		}
-		if rf.VotesReceived > len(rf.peers)/2 {
-			break
-		}
-		// @TODO check term in response?
-	}
-
-	rf.log("Node %d got %d votes\n", rf.me, rf.VotesReceived)
-	if rf.VotesReceived > len(rf.peers)/2 {
-		rf.log("Node %d received a majority of the votes, becoming leader\n", rf.me)
-		rf.State = "leader"
-		rf.sendHeartbeats()
-		rf.restartHeartbeatsTicker()
-		rf.stopElectionTimeout()
-	}
 }
 
 func (rf *Raft) startHeartbeatsTicker() {
@@ -598,6 +577,7 @@ func (rf *Raft) sendHeartbeats() {
 					if !reply.Success && reply.Term == rf.CurrentTerm {
 						// decrement nextIndex and retry
 						rf.NextIndex[nodeId] -= 1
+						rf.log("Heartbeat unsuccessful\n")
 						rf.log("Reducing NextIndex of %d to %d\n", nodeId, rf.NextIndex[nodeId])
 					} else if reply.Success {
 						// update nextIndex
