@@ -125,10 +125,10 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 				ticker = time.NewTicker(timeout)
 				//fmt.Printf("%s}*** RESTARTING ELECTION TIMEOUT ***\n", tabs(rf.me))
 			case <-ticker.C:
-				rf.log("*** ELECTION TIMEOUT ***{\n")
+				rf.log("*** ELECTION TIMEOUT TERM = %d ***{\n", rf.CurrentTerm)
 				rf.log("Election timeout! Node %d starting new election\n", rf.me)
 				rf.startElection()
-				rf.log("}*** ELECTION TIMEOUT ***\n")
+				rf.log("}*** ELECTION TIMEOUT TERM = %d ***\n", rf.CurrentTerm)
 			}
 		}
 	}()
@@ -665,10 +665,12 @@ func (rf *Raft) checkCommitted() {
 
 func (rf *Raft) log(format string, args ...interface{}) {
 	t := time.Since(rf.t0)
+	fmtArgs := []interface{}{t / time.Millisecond, tabs(rf.me)}
 	if len(args) > 0 {
-		fmt.Printf("(%dms)%s"+format, t/time.Millisecond, tabs(rf.me), args)
+		fmtArgs = append(fmtArgs, args...)
+		fmt.Printf("(%dms)%s"+format, fmtArgs...)
 	} else {
-		fmt.Printf("(%dms)%s"+format, t/time.Millisecond, tabs(rf.me))
+		fmt.Printf("(%dms)%s"+format, fmtArgs...)
 	}
 }
 
