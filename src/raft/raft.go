@@ -69,6 +69,7 @@ type Raft struct {
 	electionTimeout  *ElectionTimeout
 	heartbeatsTicker *HeartbeatsTicker
 	applyCh          chan ApplyMsg
+	electionDisabled bool
 
 	// Volatile data when leader
 	NextIndex  []int
@@ -125,6 +126,10 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 				ticker = time.NewTicker(timeout)
 				rf.log("\033[33m}*** RESTARTING ELECTION TIMEOUT ***\033[0m\n")
 			case <-ticker.C:
+				if rf.electionDisabled {
+					rf.log("\033[33m*** SKIPPING ELECTION TIMEOUT TERM = %d ***\033[0m\n", rf.CurrentTerm+1)
+					continue
+				}
 				rf.log("\033[33m*** ELECTION TIMEOUT TERM = %d ***{\033[0m\n", rf.CurrentTerm+1)
 				rf.log("\033[33mElection timeout! Node %d starting new election\033[0m\n", rf.me)
 				rf.startElection()
@@ -238,6 +243,10 @@ func tabs(i int) string {
 	return strings.Repeat("\t", i)
 }
 
+func (rf *Raft) noElections(disabled bool){
+	rf.electionDisabled = disabled
+}
+
 func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.log("%d -> RequestVoteReply -> %d: Vote\n", rf.me, args.CandidateId)
 	rf.VotedFor = args.CandidateId
@@ -252,34 +261,31 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.noElections(true)
+	defer rf.noElections(false)
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
 		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
 	rf.log("%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
 
 	reply.Term = rf.CurrentTerm
-	rf.CurrentTerm = max(rf.CurrentTerm, args.Term)
 
 	if rf.State == "candidate" && rf.CurrentTerm < args.Term {
 		rf.State = "follower"
 		rf.VoteYes(args, reply)
-		return
-	}
-
-	if rf.CurrentTerm > args.Term || rf.AlreadyVoted {
+	} else if rf.CurrentTerm > args.Term || rf.AlreadyVoted {
 		if rf.CurrentTerm > args.Term {
 			rf.log("%d -> RequestVoteReply -> %d: Term outdated\n", rf.me, args.CandidateId)
 		} else {
 			rf.log("%d -> RequestVoteReply -> %d: AlreadyVoted - term = %d \n", rf.me, args.CandidateId, rf.CurrentTerm)
 		}
 		reply.VoteGranted = false
-		return
-	}
-	if candidateIsAsUp2Date {
+	} else if candidateIsAsUp2Date {
 		rf.VoteYes(args, reply)
 	} else {
 		reply.VoteGranted = false
 		rf.log("%d -> RequestVoteReply -> %d: Candidate is not up2date\n", rf.me, args.CandidateId)
 	}
+	rf.CurrentTerm = max(rf.CurrentTerm, args.Term)
 }
 
 // AppendEntries RPC Handler
@@ -311,28 +317,32 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 }
 
 func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
+	// translate 1 indexed PrevLogIndex to a 0 indexed local
+	prevLogIndex := args.PrevLogIndex-1
+
 	// reply false if we don't have prevLogIndex
-	if len(rf.Log) < args.PrevLogIndex - 1 {
+	if len(rf.Log) < prevLogIndex {
 		rf.log("Didn't have PrevLogIndex %d\n", args.PrevLogIndex)
 		return false
 	}
 
 	rf.log("%+v\n", args)
-	if len(rf.Log) > 0 && args.PrevLogIndex > 0 {
+	if len(rf.Log) > 0 && prevLogIndex >= 0 {
 		// reply false if we do, but term doesn't match
-		if rf.Log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
-			rf.log("Terms don't match %d %d\n", rf.Log[args.PrevLogIndex-1].Term, args.PrevLogTerm)
+		if rf.Log[prevLogIndex].Term != args.PrevLogTerm {
+			rf.log("Terms don't match %d %d\n", rf.Log[prevLogIndex].Term, args.PrevLogTerm)
 			return false
 		}
 
 		// check if entries after prevLogIndex
 		// are different from ones in args.Entries
 		// if so, delete them and all that follow
-		for i := args.PrevLogIndex; i < args.PrevLogIndex+len(args.Entries) && i < len(rf.Log); i += 1 {
-			ourTerm := rf.Log[i].Term
-			theirTerm := args.Entries[i-args.PrevLogIndex-1].Term
+		rf.log("Checking for dirty entries on log %v", rf.Log)
+		for ri,li := 0, prevLogIndex+1; ri < len(args.Entries) && li < len(rf.Log); ri,li = ri+1,li+1 {
+			ourTerm := rf.Log[li].Term
+			theirTerm := args.Entries[ri].Term
 			if ourTerm != theirTerm {
-				rf.Log = rf.Log[:i]
+				rf.Log = rf.Log[:li]
 				break
 			}
 		}
@@ -505,6 +515,11 @@ func (rf *Raft) buildVoteRequest() RequestVoteArgs {
 }
 
 func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.State == "leader" {
+		return
+	}
 	rf.CurrentTerm = rf.CurrentTerm + 1
 	rf.VotedFor = rf.me
 	rf.AlreadyVoted = true
