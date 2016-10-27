@@ -257,6 +257,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.log("%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
 
 	reply.Term = rf.CurrentTerm
+	rf.CurrentTerm = max(rf.CurrentTerm, args.Term)
 
 	if rf.State == "candidate" && rf.CurrentTerm < args.Term {
 		rf.State = "follower"
@@ -311,7 +312,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	// reply false if we don't have prevLogIndex
-	if len(rf.Log) < args.PrevLogIndex-1 {
+	if len(rf.Log) < args.PrevLogIndex - 1 {
 		rf.log("Didn't have PrevLogIndex %d\n", args.PrevLogIndex)
 		return false
 	}
@@ -338,10 +339,31 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	}
 
 	// append the entries not already in the log
-	firstNotInLog := len(rf.Log) - args.PrevLogIndex
-	entriesNotInLog := args.Entries[firstNotInLog:]
-	rf.Log = append(rf.Log, entriesNotInLog...)
+	// args.Entries := [3,4,5]
+	// prev = 2
+	// rf.Log = [1,2]
+	// args.Entries[0:]
 
+	// args.Entries := [3,4,5]
+	// prev = 2
+	// rf.Log = [1,2,3,4]
+	// args.Entries[2:]
+
+	// args.Entries := [2]
+	// prev = 1
+	// rf.Log = [1,2]
+	// args.Entries[1:]
+
+	// args.Entries = [1]
+	// prev = 0
+	// rf.Log = []
+	// args.Entries[0:]
+	firstNotInLog := len(rf.Log) - args.PrevLogIndex
+	rf.log("rf.Log: %d, args.prev: %d, args.entries: %d\n", len(rf.Log), args.PrevLogIndex, len(args.Entries))
+	if (firstNotInLog < len(args.Entries)){
+		entriesNotInLog := args.Entries[firstNotInLog:]
+		rf.Log = append(rf.Log, entriesNotInLog...)
+	}
 	rf.log("%v\n", rf.Log)
 
 	// set commitIndex to min(leaderCommitIndex, index of last entry received)
@@ -354,6 +376,12 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 
 func min(x, y int) int {
 	if x < y {
+		return x
+	}
+	return y
+}
+func max(x, y int) int {
+	if x > y {
 		return x
 	}
 	return y
