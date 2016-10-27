@@ -261,6 +261,8 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.log("Received request vote from %d \n", args.CandidateId)
+	rf.logCurrentState()
 	rf.noElections(true)
 	defer rf.noElections(false)
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
@@ -288,10 +290,18 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.CurrentTerm = max(rf.CurrentTerm, args.Term)
 }
 
+func (rf *Raft) logCurrentState() {
+	rf.log("[Term = %d, Log Length = %d, Log = %v ]", rf.CurrentTerm, len(rf.Log), rf.Log)
+}
+
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	rf.log("Received AppendEntries from %d: %v - PrevLogIndex = %d, PrevLogTerm = %d\n", args.LeaderId, args.Entries, args.PrevLogIndex, args.PrevLogTerm)
+	rf.logCurrentState()
+
 	reply.Term = rf.CurrentTerm
 
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
@@ -603,7 +613,7 @@ type HeartbeatUpdateMsg struct {
 }
 
 func (rf *Raft) sendHeartbeats() {
-	rf.log("Node %d sending heartbeats, log: %v\n", rf.me, rf.Log)
+	rf.log("Node %d sending heartbeats, current log: %v\n", rf.me, rf.Log)
 
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
@@ -642,6 +652,7 @@ func (rf *Raft) sendHeartbeats() {
 }
 
 func (rf *Raft) buildEntriesForPeer(nodeId int) []LogEntry {
+	rf.log("Building entries for node %d\n", nodeId)
 	nextIndex := rf.NextIndex[nodeId]
 	if nextIndex-1 < len(rf.Log) {
 		index := nextIndex - 1
@@ -675,6 +686,7 @@ func (rf *Raft) checkCommitted() {
 	defer rf.mu.Unlock()
 	lastIndex := len(rf.Log)
 	majority := len(rf.peers) / 2
+	rf.log("Checking commited from %d to %d\n", lastIndex, rf.CommitIndex)
 	for n := lastIndex; n > rf.CommitIndex; n -= 1 {
 		counter := 1
 		for idx := range rf.MatchIndex {
@@ -684,7 +696,7 @@ func (rf *Raft) checkCommitted() {
 		}
 		if counter > majority {
 			rf.commitAndApply(n)
-			fmt.Printf(">> Committed = %d\n", n)
+			rf.log(">> Committed = %d\n", n)
 			break
 		}
 	}
@@ -695,10 +707,8 @@ func (rf *Raft) log(format string, args ...interface{}) {
 	fmtArgs := []interface{}{t / time.Millisecond, tabs(rf.me)}
 	if len(args) > 0 {
 		fmtArgs = append(fmtArgs, args...)
-		fmt.Printf("(%dms)%s"+format, fmtArgs...)
-	} else {
-		fmt.Printf("(%dms)%s"+format, fmtArgs...)
 	}
+	fmt.Printf("(%dms)%s"+format, fmtArgs...)
 }
 
 func (rf *Raft) commitAndApply(index int) {
