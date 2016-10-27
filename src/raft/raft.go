@@ -116,19 +116,19 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 		for {
 			select {
 			case <-rf.electionTimeout.stopChan:
-				rf.log("*** STOPPING ELECTION TIMEOUT ***{\n")
+				rf.log("\033[33m*** STOPPING ELECTION TIMEOUT ***{\033[0m\n")
 				ticker.Stop()
 				rf.log("}*** STOPPED ELECTION TIMEOUT ***\n")
 			case <-rf.electionTimeout.restartChan:
-				rf.log("*** RESTARTING ELECTION TIMEOUT ***{\n")
+				rf.log("\033[33m*** RESTARTING ELECTION TIMEOUT ***{\033[0m\n")
 				ticker.Stop()
 				ticker = time.NewTicker(timeout)
-				rf.log("}*** RESTARTING ELECTION TIMEOUT ***\n")
+				rf.log("\033[33m}*** RESTARTING ELECTION TIMEOUT ***\033[0m\n")
 			case <-ticker.C:
-				rf.log("*** ELECTION TIMEOUT TERM = %d ***{\n", rf.CurrentTerm+1)
-				rf.log("Election timeout! Node %d starting new election\n", rf.me)
+				rf.log("\033[33m*** ELECTION TIMEOUT TERM = %d ***{\033[0m\n", rf.CurrentTerm+1)
+				rf.log("\033[33mElection timeout! Node %d starting new election\033[0m\n", rf.me)
 				rf.startElection()
-				rf.log("}*** ELECTION TIMEOUT TERM = %d ***\n", rf.CurrentTerm)
+				rf.log("\033[33m}*** ELECTION TIMEOUT TERM = %d ***\033[0m\n", rf.CurrentTerm)
 			}
 		}
 	}()
@@ -252,8 +252,6 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.log("Received request vote from %d \n", args.CandidateId)
-	rf.logCurrentState()
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
 		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
 	rf.log("%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
@@ -283,19 +281,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-func (rf *Raft) logCurrentState() {
-	last := rf.lastEntry()
-	rf.log("[Term = %d, Log Length = %d, Last Log Entry = { Term = %d , Data = %d } ]", rf.CurrentTerm, len(rf.Log), last.Term, last.Data)
-}
-
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
-	rf.log("Received AppendEntries from %d: %v - PrevLogIndex = %d, PrevLogTerm = %d\n", args.LeaderId, args.Entries, args.PrevLogIndex, args.PrevLogTerm)
-	rf.logCurrentState()
-
 	reply.Term = rf.CurrentTerm
 
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
@@ -497,7 +486,7 @@ func (rf *Raft) startElection() {
 
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
-			go func(nodeId int) {
+			go func(nodeId int, localTerm int) {
 				var reply RequestVoteReply
 				rf.log("%d -> RequestVoteRequest -> %d\n", rf.me, nodeId)
 				rpcSuccess := rf.sendRequestVote(nodeId, request, &reply)
@@ -506,7 +495,11 @@ func (rf *Raft) startElection() {
 				rf.mu.Lock()
 				if rpcSuccess && rf.State != "leader" { // this is a short-circuit
 					if reply.VoteGranted {
-						rf.VotesReceived += 1
+						if localTerm == rf.CurrentTerm {
+							rf.VotesReceived += 1
+						} else {
+							rf.log("Vote from %d ignored, Term was %d\n", nodeId, reply.Term)
+						}
 					}
 					rf.log("Node %d got %d votes so far\n", rf.me, rf.VotesReceived)
 					if rf.VotesReceived > len(rf.peers)/2 {
@@ -518,7 +511,7 @@ func (rf *Raft) startElection() {
 					}
 				}
 				rf.mu.Unlock()
-			}(i)
+			}(i, rf.CurrentTerm)
 		}
 	}
 
@@ -567,7 +560,7 @@ type HeartbeatUpdateMsg struct {
 }
 
 func (rf *Raft) sendHeartbeats() {
-	rf.log("Node %d sending heartbeats, current log: %v\n", rf.me, rf.Log)
+	rf.log("Node %d sending heartbeats, log: %v\n", rf.me, rf.Log)
 
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
@@ -606,7 +599,6 @@ func (rf *Raft) sendHeartbeats() {
 }
 
 func (rf *Raft) buildEntriesForPeer(nodeId int) []LogEntry {
-	rf.log("Building entries for node %d\n", nodeId)
 	nextIndex := rf.NextIndex[nodeId]
 	if nextIndex-1 < len(rf.Log) {
 		index := nextIndex - 1
@@ -660,8 +652,10 @@ func (rf *Raft) log(format string, args ...interface{}) {
 	fmtArgs := []interface{}{t / time.Millisecond, tabs(rf.me)}
 	if len(args) > 0 {
 		fmtArgs = append(fmtArgs, args...)
+		fmt.Printf("(%dms)%s"+format, fmtArgs...)
+	} else {
+		fmt.Printf("(%dms)%s"+format, fmtArgs...)
 	}
-	fmt.Printf("(%dms)%s"+format, fmtArgs...)
 }
 
 func (rf *Raft) commitAndApply(index int) {
