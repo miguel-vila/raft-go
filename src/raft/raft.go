@@ -252,6 +252,8 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.log("Received request vote from %d \n", args.CandidateId)
+	rf.logCurrentState()
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
 		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
 	rf.log("%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
@@ -281,10 +283,19 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
+func (rf *Raft) logCurrentState() {
+	last := rf.lastEntry()
+	rf.log("[Term = %d, Log Length = %d, Last Log Entry = { Term = %d , Data = %d } ]", rf.CurrentTerm, len(rf.Log), last.Term, last.Data)
+}
+
 // AppendEntries RPC Handler
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	rf.log("Received AppendEntries from %d: %v - PrevLogIndex = %d, PrevLogTerm = %d\n", args.LeaderId, args.Entries, args.PrevLogIndex, args.PrevLogTerm)
+	rf.logCurrentState()
+
 	reply.Term = rf.CurrentTerm
 
 	if (rf.State == "candidate" && args.Term >= rf.CurrentTerm) || args.Term > rf.CurrentTerm {
@@ -556,7 +567,7 @@ type HeartbeatUpdateMsg struct {
 }
 
 func (rf *Raft) sendHeartbeats() {
-	rf.log("Node %d sending heartbeats, log: %v\n", rf.me, rf.Log)
+	rf.log("Node %d sending heartbeats, current log: %v\n", rf.me, rf.Log)
 
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
@@ -595,6 +606,7 @@ func (rf *Raft) sendHeartbeats() {
 }
 
 func (rf *Raft) buildEntriesForPeer(nodeId int) []LogEntry {
+	rf.log("Building entries for node %d\n", nodeId)
 	nextIndex := rf.NextIndex[nodeId]
 	if nextIndex-1 < len(rf.Log) {
 		index := nextIndex - 1
@@ -648,10 +660,8 @@ func (rf *Raft) log(format string, args ...interface{}) {
 	fmtArgs := []interface{}{t / time.Millisecond, tabs(rf.me)}
 	if len(args) > 0 {
 		fmtArgs = append(fmtArgs, args...)
-		fmt.Printf("(%dms)%s"+format, fmtArgs...)
-	} else {
-		fmt.Printf("(%dms)%s"+format, fmtArgs...)
 	}
+	fmt.Printf("(%dms)%s"+format, fmtArgs...)
 }
 
 func (rf *Raft) commitAndApply(index int) {
