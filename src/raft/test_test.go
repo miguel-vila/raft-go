@@ -163,16 +163,23 @@ func TestFailAgree(t *testing.T) {
 	fmt.Printf("-- %d servers should agree on command 103\n", servers-1)
 	cfg.one(103, servers-1)
 	fmt.Printf("-- verification passed\n")
+	fmt.Printf("-- sleeping\n")
 	time.Sleep(RaftElectionTimeout)
+	fmt.Printf("-- %d servers should agree on command 104\n", servers-1)
 	cfg.one(104, servers-1)
+	fmt.Printf("-- %d servers should agree on command 105\n", servers-1)
 	cfg.one(105, servers-1)
 
 	// failed server re-connected
+	fmt.Printf("-- reconnecting server %d\n", (leader+1)%servers)
 	cfg.connect((leader + 1) % servers)
 
 	// agree with full set of servers?
+	fmt.Printf("-- %d servers should agree on command 106\n", servers)
 	cfg.one(106, servers)
+	fmt.Printf("-- sleeping\n")
 	time.Sleep(RaftElectionTimeout)
+	fmt.Printf("-- %d servers should agree on command 107\n", servers)
 	cfg.one(107, servers)
 
 	fmt.Printf("  ... Passed\n")

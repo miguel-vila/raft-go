@@ -243,7 +243,7 @@ func tabs(i int) string {
 	return strings.Repeat("\t", i)
 }
 
-func (rf *Raft) noElections(disabled bool){
+func (rf *Raft) noElections(disabled bool) {
 	rf.electionDisabled = disabled
 }
 
@@ -291,7 +291,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) logCurrentState() {
-	rf.log("[Term = %d, Log Length = %d, Log = %v ]", rf.CurrentTerm, len(rf.Log), rf.Log)
+	rf.log("[Node = %d, Term = %d, CommitIndex = %d, Log = %v ]\n", rf.me, rf.CurrentTerm, rf.CommitIndex, rf.Log)
 }
 
 // AppendEntries RPC Handler
@@ -299,7 +299,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.log("Received AppendEntries from %d: %v - PrevLogIndex = %d, PrevLogTerm = %d\n", args.LeaderId, args.Entries, args.PrevLogIndex, args.PrevLogTerm)
+	rf.log("Received AppendEntries from %d: %v - PrevLogIndex = %d, PrevLogTerm = %d, LeaderCommit = %d\n", args.LeaderId, args.Entries, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 	rf.logCurrentState()
 
 	reply.Term = rf.CurrentTerm
@@ -328,7 +328,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	// translate 1 indexed PrevLogIndex to a 0 indexed local
-	prevLogIndex := args.PrevLogIndex-1
+	prevLogIndex := args.PrevLogIndex - 1
 
 	// reply false if we don't have prevLogIndex
 	if len(rf.Log) < prevLogIndex {
@@ -348,7 +348,7 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 		// are different from ones in args.Entries
 		// if so, delete them and all that follow
 		rf.log("Checking for dirty entries on log %v", rf.Log)
-		for ri,li := 0, prevLogIndex+1; ri < len(args.Entries) && li < len(rf.Log); ri,li = ri+1,li+1 {
+		for ri, li := 0, prevLogIndex+1; ri < len(args.Entries) && li < len(rf.Log); ri, li = ri+1, li+1 {
 			ourTerm := rf.Log[li].Term
 			theirTerm := args.Entries[ri].Term
 			if ourTerm != theirTerm {
@@ -380,7 +380,7 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	// args.Entries[0:]
 	firstNotInLog := len(rf.Log) - args.PrevLogIndex
 	rf.log("rf.Log: %d, args.prev: %d, args.entries: %d\n", len(rf.Log), args.PrevLogIndex, len(args.Entries))
-	if (firstNotInLog < len(args.Entries)){
+	if firstNotInLog < len(args.Entries) {
 		entriesNotInLog := args.Entries[firstNotInLog:]
 		rf.Log = append(rf.Log, entriesNotInLog...)
 	}
@@ -389,6 +389,7 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	// set commitIndex to min(leaderCommitIndex, index of last entry received)
 	lastEntryIndex := args.PrevLogIndex + len(args.Entries)
 	newCommitIndex := min(args.LeaderCommit, lastEntryIndex)
+	rf.log("New commit index = %d,\n", newCommitIndex)
 	rf.commitAndApply(newCommitIndex)
 	rf.log("CommitIndex: %d\n", rf.CommitIndex)
 	return true
@@ -614,6 +615,7 @@ type HeartbeatUpdateMsg struct {
 
 func (rf *Raft) sendHeartbeats() {
 	rf.log("Node %d sending heartbeats, current log: %v\n", rf.me, rf.Log)
+	rf.logCurrentState()
 
 	for i := 0; i < len(rf.peers); i += 1 {
 		if i != rf.me {
@@ -640,7 +642,9 @@ func (rf *Raft) sendHeartbeats() {
 						// update nextIndex
 						rf.NextIndex[nodeId] = logIndex + 1
 						rf.MatchIndex[nodeId] = logIndex
-						rf.log("NextIndex[%d] is %d\n", nodeId, rf.NextIndex[nodeId])
+						rf.log("NextIndex = %v\n", rf.NextIndex)
+						rf.log("MatchIndex = %v\n", rf.MatchIndex)
+
 						rf.checkCommitted()
 					}
 				}
@@ -686,14 +690,17 @@ func (rf *Raft) checkCommitted() {
 	defer rf.mu.Unlock()
 	lastIndex := len(rf.Log)
 	majority := len(rf.peers) / 2
-	rf.log("Checking commited from %d to %d\n", lastIndex, rf.CommitIndex)
+	rf.log("Checking commited from [%d-%d)\n", lastIndex, rf.CommitIndex)
 	for n := lastIndex; n > rf.CommitIndex; n -= 1 {
 		counter := 1
-		for idx := range rf.MatchIndex {
+		for i := range rf.MatchIndex {
+			idx := rf.MatchIndex[i]
+			rf.log("idx = %d\n", idx)
 			if idx >= n {
 				counter += 1
 			}
 		}
+		rf.log("counter = %d , n = %d\n", counter, n)
 		if counter > majority {
 			rf.commitAndApply(n)
 			rf.log(">> Committed = %d\n", n)
@@ -720,5 +727,7 @@ func (rf *Raft) commitAndApply(index int) {
 		}
 		rf.log("COMMITED %d \n", rf.Log[index-1].Data)
 		rf.LastApplied = index
+	} else {
+		rf.log("Didn't commit entry at %d because commit index is greater or equal (%d)\n", index, rf.CommitIndex)
 	}
 }
