@@ -347,7 +347,7 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 		// check if entries after prevLogIndex
 		// are different from ones in args.Entries
 		// if so, delete them and all that follow
-		rf.log("Checking for dirty entries on log %v", rf.Log)
+		rf.log("Checking for dirty entries on log %v\n", rf.Log)
 		for ri, li := 0, prevLogIndex+1; ri < len(args.Entries) && li < len(rf.Log); ri, li = ri+1, li+1 {
 			ourTerm := rf.Log[li].Term
 			theirTerm := args.Entries[ri].Term
@@ -720,13 +720,25 @@ func (rf *Raft) log(format string, args ...interface{}) {
 
 func (rf *Raft) commitAndApply(index int) {
 	if rf.CommitIndex < index {
-		rf.CommitIndex = index // @TODO shouldn't we apply the commands starting at CommitIndex up until index and not just the index one?
-		rf.applyCh <- ApplyMsg{
-			Index:   index,
-			Command: rf.Log[index-1].Data,
-		}
-		rf.log("COMMITED %d \n", rf.Log[index-1].Data)
-		rf.LastApplied = index
+		go func() {
+			// This goes inside a go routine because I think blocking on the
+			// apply channel doesn't allow for other things to happen and the
+			// tests depend on that
+			// Also there is a risk for race conditions because inside the
+			// go routine we are modifying rf's state (specifically CommitIndex
+			// and LastApplied) so maybe there is a better way to do it
+			rf.log("Last commit index = %d\n", rf.CommitIndex)
+			for i := rf.CommitIndex + 1; i <= index; i += 1 {
+				rf.CommitIndex = i
+				rf.log("Applying %d (%d))\n", i, rf.Log[i-1])
+				rf.applyCh <- ApplyMsg{
+					Index:   i,
+					Command: rf.Log[i-1].Data,
+				}
+				rf.LastApplied = i
+			}
+			rf.log("COMMITED UP TO %d \n", rf.Log[index-1].Data)
+		}()
 	} else {
 		rf.log("Didn't commit entry at %d because commit index is greater or equal (%d)\n", index, rf.CommitIndex)
 	}
