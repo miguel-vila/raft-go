@@ -126,10 +126,6 @@ func (rf *Raft) startElectionTimeout(timeout time.Duration) {
 				ticker = time.NewTicker(timeout)
 				rf.log("\033[33m}*** RESTARTING ELECTION TIMEOUT ***\033[0m\n")
 			case <-ticker.C:
-				if rf.electionDisabled {
-					rf.log("\033[33m*** SKIPPING ELECTION TIMEOUT TERM = %d ***\033[0m\n", rf.CurrentTerm+1)
-					continue
-				}
 				rf.log("\033[33m*** ELECTION TIMEOUT TERM = %d ***{\033[0m\n", rf.CurrentTerm+1)
 				rf.log("\033[33mElection timeout! Node %d starting new election\033[0m\n", rf.me)
 				rf.startElection()
@@ -261,12 +257,14 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.noElections(false)
 	rf.log("Received request vote from %d \n", args.CandidateId)
 	rf.logCurrentState()
 	rf.noElections(true)
-	defer rf.noElections(false)
+
+	// the following definition of being up-to-date comes from the article's page 8, paragraph before 5.4.2
 	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
-		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log)-1) // page 8, paragraph before 5.4.2
+		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log) /* <- off by 1 error? */)
 	rf.log("%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
 
 	reply.Term = rf.CurrentTerm
@@ -528,7 +526,7 @@ func (rf *Raft) buildVoteRequest() RequestVoteArgs {
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.State == "leader" {
+	if rf.State == "leader" || rf.electionDisabled {
 		return
 	}
 	rf.CurrentTerm = rf.CurrentTerm + 1
@@ -559,9 +557,22 @@ func (rf *Raft) startElection() {
 					if rf.VotesReceived > len(rf.peers)/2 {
 						rf.log("Node %d received a majority of the votes, becoming leader\n", rf.me)
 						rf.State = "leader"
+
+						// Reinitialize NextIndex and MatchIndex after election
+						rf.NextIndex = make([]int, len(rf.peers))
+						for i := 0; i < len(rf.peers); i += 1 {
+							rf.NextIndex[i] = len(rf.Log) + 1
+						}
+
+						rf.MatchIndex = make([]int, len(rf.peers))
+
 						rf.sendHeartbeats()
 						rf.restartHeartbeatsTicker()
 						rf.stopElectionTimeout()
+					}
+					if !reply.VoteGranted && reply.Term > rf.CurrentTerm {
+						rf.State = "follower"
+						rf.CurrentTerm = reply.Term
 					}
 				}
 				rf.mu.Unlock()
@@ -669,6 +680,8 @@ func (rf *Raft) buildEntriesForPeer(nodeId int) []LogEntry {
 }
 
 func (rf *Raft) buildAppendEntriesRequest(nodeId int) AppendEntriesArgs {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	entries := rf.buildEntriesForPeer(nodeId)
 	prevIndex := rf.NextIndex[nodeId] - 1
 	prevTerm := 0
@@ -693,8 +706,7 @@ func (rf *Raft) checkCommitted() {
 	rf.log("Checking commited from [%d-%d)\n", lastIndex, rf.CommitIndex)
 	for n := lastIndex; n > rf.CommitIndex; n -= 1 {
 		counter := 1
-		for i := range rf.MatchIndex {
-			idx := rf.MatchIndex[i]
+		for _, idx := range rf.MatchIndex {
 			rf.log("idx = %d\n", idx)
 			if idx >= n {
 				counter += 1
@@ -724,9 +736,7 @@ func (rf *Raft) commitAndApply(index int) {
 			// This goes inside a go routine because I think blocking on the
 			// apply channel doesn't allow for other things to happen and the
 			// tests depend on that
-			// Also there is a risk for race conditions because inside the
-			// go routine we are modifying rf's state (specifically CommitIndex
-			// and LastApplied) so maybe there is a better way to do it
+			rf.mu.Lock()
 			rf.log("Last commit index = %d\n", rf.CommitIndex)
 			for i := rf.CommitIndex + 1; i <= index; i += 1 {
 				rf.CommitIndex = i
@@ -738,6 +748,7 @@ func (rf *Raft) commitAndApply(index int) {
 				rf.LastApplied = i
 			}
 			rf.log("COMMITED UP TO %d \n", rf.Log[index-1].Data)
+			rf.mu.Unlock()
 		}()
 	} else {
 		rf.log("Didn't commit entry at %d because commit index is greater or equal (%d)\n", index, rf.CommitIndex)
