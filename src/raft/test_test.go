@@ -345,33 +345,46 @@ func TestRejoin(t *testing.T) {
 
 	fmt.Printf("Test: rejoin of partitioned leader ...\n")
 
+	fmt.Printf("-- %d servers should agree on command 101\n", servers)
 	cfg.one(101, servers)
+	fmt.Printf("-- Verification passed\n")
 
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
+	fmt.Printf("-- Disconnecting leader %d\n", leader1)
 	cfg.disconnect(leader1)
 
 	// make old leader try to agree on some entries
+	fmt.Printf("-- Sending {102,103,104} commands to disconnected leader\n")
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
 	cfg.rafts[leader1].Start(104)
 
 	// new leader commits, also for index=2
+	fmt.Printf("-- 2 servers of the partition should agree on command 103\n")
 	cfg.one(103, 2)
+	fmt.Printf("-- Verification passed\n")
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("-- Disconnecting second leader %d\n", leader2)
 	cfg.disconnect(leader2)
 
 	// old leader connected again
+	fmt.Printf("-- Reconnecting old leader %d\n", leader1)
 	cfg.connect(leader1)
 
+	fmt.Printf("-- 2 servers of the partition should agree on command 104\n")
 	cfg.one(104, 2)
+	fmt.Printf("-- Verification passed\n")
 
 	// all together now
+	fmt.Printf("-- Received second leader %d. All nodes should be together\n", leader2)
 	cfg.connect(leader2)
 
+	fmt.Printf("-- %d servers of the partition should agree on command 105\n", servers)
 	cfg.one(105, servers)
+	fmt.Printf("-- Verification passed\n")
 
 	fmt.Printf("  ... Passed\n")
 }
