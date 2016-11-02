@@ -250,7 +250,16 @@ func (rf *Raft) VoteYes(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.VotedFor = args.CandidateId
 	rf.LastVoteTerm = args.Term
 	reply.VoteGranted = true
+	rf.CurrentTerm = args.Term
 	rf.startElectionTimeout(randomTimeout())
+}
+
+func (rf *Raft) isAsUpToDate(lastLogIndexCandidate int, lastLogTermCandidate int) bool {
+	if rf.lastEntry().Term == lastLogTermCandidate {
+		return len(rf.Log) <= lastLogIndexCandidate
+	} else {
+		return rf.lastEntry().Term <= lastLogTermCandidate
+	}
 }
 
 //
@@ -265,29 +274,28 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	rf.noElections(true)
 
 	// the following definition of being up-to-date comes from the article's page 8, paragraph before 5.4.2
-	candidateIsAsUp2Date := (args.LastLogTerm != rf.lastEntry().Term && args.Term >= rf.CurrentTerm) ||
-		(args.LastLogTerm == rf.lastEntry().Term && args.LastLogIndex >= len(rf.Log) /* <- off by 1 error? */)
+	candidateIsAsUp2Date := rf.isAsUpToDate(args.LastLogIndex, args.LastLogTerm)
 	rf.log("%d <- RequestVoteRequest <- %d: IsUpToDate? %t\n", rf.me, args.CandidateId, candidateIsAsUp2Date)
 
 	reply.Term = rf.CurrentTerm
 
-	if rf.State == "candidate" && rf.CurrentTerm < args.Term {
-		rf.State = "follower"
-		rf.VoteYes(args, reply)
-	} else if rf.CurrentTerm > args.Term || rf.LastVoteTerm == args.Term {
+	if rf.CurrentTerm > args.Term || rf.LastVoteTerm == args.Term || !candidateIsAsUp2Date {
 		if rf.CurrentTerm > args.Term {
 			rf.log("%d -> RequestVoteReply -> %d: Term outdated\n", rf.me, args.CandidateId)
-		} else {
+		} else if rf.LastVoteTerm == args.Term {
 			rf.log("%d -> RequestVoteReply -> %d: Already Voted for term = %d \n", rf.me, args.CandidateId, rf.LastVoteTerm)
+		} else {
+			rf.log("%d -> RequestVoteReply -> %d: Candidate is not up to date\n", rf.me, args.CandidateId)
 		}
 		reply.VoteGranted = false
-	} else if candidateIsAsUp2Date {
-		rf.VoteYes(args, reply)
 	} else {
-		reply.VoteGranted = false
-		rf.log("%d -> RequestVoteReply -> %d: Candidate is not up2date\n", rf.me, args.CandidateId)
+		if args.Term > rf.CurrentTerm {
+			rf.stopHeartbeats()
+			rf.State = "follower"
+		}
+		rf.VoteYes(args, reply)
 	}
-	rf.CurrentTerm = max(rf.CurrentTerm, args.Term)
+
 }
 
 func (rf *Raft) logCurrentState() {
@@ -328,9 +336,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 	// translate 1 indexed PrevLogIndex to a 0 indexed local
 	prevLogIndex := args.PrevLogIndex - 1
+	rf.log("prevLogIndex = %d , log length = %d\n", prevLogIndex, len(rf.Log))
 
 	// reply false if we don't have prevLogIndex
-	if len(rf.Log) < prevLogIndex {
+	if len(rf.Log) <= prevLogIndex {
 		rf.log("Didn't have PrevLogIndex %d\n", args.PrevLogIndex)
 		return false
 	}
@@ -383,14 +392,16 @@ func (rf *Raft) appendToLog(args AppendEntriesArgs) bool {
 		entriesNotInLog := args.Entries[firstNotInLog:]
 		rf.Log = append(rf.Log, entriesNotInLog...)
 	}
-	rf.log("%v\n", rf.Log)
+	rf.log("After appending entries not in log: %v\n", rf.Log)
 
 	// set commitIndex to min(leaderCommitIndex, index of last entry received)
-	lastEntryIndex := args.PrevLogIndex + len(args.Entries)
-	newCommitIndex := min(args.LeaderCommit, lastEntryIndex)
-	rf.log("New commit index = %d,\n", newCommitIndex)
-	rf.commitAndApply(newCommitIndex)
-	rf.log("CommitIndex: %d\n", rf.CommitIndex)
+	if args.LeaderCommit > rf.CommitIndex {
+		lastEntryIndex := args.PrevLogIndex + len(args.Entries)
+		newCommitIndex := min(args.LeaderCommit, lastEntryIndex)
+		rf.log("New commit index = %d,\n", newCommitIndex)
+		rf.commitAndApply(newCommitIndex)
+		rf.log("CommitIndex: %d\n", rf.CommitIndex)
+	}
 	return true
 }
 
@@ -563,12 +574,10 @@ func (rf *Raft) startElection() {
 						rf.State = "leader"
 
 						// Reinitialize NextIndex and MatchIndex after election
-						rf.NextIndex = make([]int, len(rf.peers))
 						for i := 0; i < len(rf.peers); i += 1 {
 							rf.NextIndex[i] = len(rf.Log) + 1
+							rf.MatchIndex[i] = 0
 						}
-
-						rf.MatchIndex = make([]int, len(rf.peers))
 
 						rf.sendHeartbeats()
 						rf.restartHeartbeatsTicker()
@@ -656,12 +665,10 @@ func (rf *Raft) sendHeartbeats() {
 					rf.log("Heartbeat unsuccessful\n")
 					rf.log("Reducing NextIndex of %d to %d\n", nodeId, rf.NextIndex[nodeId])
 				} else if !reply.Success && reply.Term > rf.CurrentTerm {
-					/*
-						rf.CurrentTerm = reply.Term
-						rf.stopHeartbeats()
-						rf.startElectionTimeout(randomTimeout())
-						rf.State = "follower"
-					*/
+					rf.CurrentTerm = reply.Term
+					rf.stopHeartbeats()
+					rf.startElectionTimeout(randomTimeout())
+					rf.State = "follower"
 				} else if reply.Success {
 					// update nextIndex
 					rf.NextIndex[nodeId] = logIndex + 1
