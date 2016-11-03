@@ -280,6 +280,15 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.CurrentTerm
 
 	if rf.CurrentTerm > args.Term || rf.LastVoteTerm == args.Term || !candidateIsAsUp2Date {
+		if args.Term > rf.CurrentTerm {
+			rf.stopHeartbeats()
+			if rf.State != "follower" {
+				rf.startElectionTimeout(randomTimeout())
+			}
+			rf.CurrentTerm = args.Term
+			rf.State = "follower"
+		}
+		// Log why the vote was denied
 		if rf.CurrentTerm > args.Term {
 			rf.log("%d -> RequestVoteReply -> %d: Term outdated\n", rf.me, args.CandidateId)
 		} else if rf.LastVoteTerm == args.Term {
@@ -579,7 +588,6 @@ func (rf *Raft) startElection() {
 							rf.MatchIndex[i] = 0
 						}
 
-						rf.sendHeartbeats()
 						rf.restartHeartbeatsTicker()
 						rf.stopElectionTimeout()
 					}
